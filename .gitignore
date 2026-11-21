@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+
+# Datos descargados / generados localmente (pesados, caché o credenciales)
+data/rebrickable/
+data/ldraw/
+data/omr/
+data/catalog.sqlite
+data/catalog.sqlite-*
+data/*.zip
+data/*.part
+data/api_cache.json
+data/api_config.json
+
+# Salidas generadas de sets (se regeneran desde Sets/ o al unirse a una sala)
+output/sets/*.json
+output/covers/*.png
+
+# PDFs y partidas personales del usuario
+Sets/*.pdf
+Sets/*.downloading
+Saves/
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+
+# OS / Editor
+.DS_Store
+Thumbs.db

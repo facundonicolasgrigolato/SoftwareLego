@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SoftwareLego — Mesa Virtual 3D</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #131b2e; color: #e6edf3; overflow: hidden; }
+      .hidden { display: none !important; }
+    </style>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <section id="lobby-screen" class="lobby-screen">
+      <header class="lobby-header">
+        <div class="brand">
+          <span class="lego-brick-badge is-yellow" aria-hidden="true"></span>
+          <strong>SoftwareLego</strong>
+          <span class="lobby-subtitle">Sala de Juego 3D · <span id="lobby-count">0 sets</span></span>
+        </div>
+        <button id="btn-join-room" type="button" class="btn btn-primary lobby-join-btn">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <circle cx="12" cy="8" r="3.4" />
+            <path d="M5.6 19.2c0-3.2 2.9-5.4 6.4-5.4s6.4 2.2 6.4 5.4H5.6Z" />
+            <circle cx="5.7" cy="10.2" r="2.4" />
+            <path d="M1.2 19.2c0-2.1 1.7-3.6 3.9-3.9a7.1 7.1 0 0 0-.9 3.9H1.2Z" />
+            <circle cx="18.3" cy="10.2" r="2.4" />
+            <path d="M19.8 19.2a7.1 7.1 0 0 0-.9-3.9c2.2.3 3.9 1.8 3.9 3.9h-3Z" />
+          </svg>
+          <span>Unirse a sala</span>
+        </button>
+      </header>
+
+      <div class="lobby-layout">
+        <aside class="lobby-sidebar">
+          <label id="pdf-dropzone" class="pdf-dropzone">
+            <input id="input-upload-pdf" type="file" accept=".pdf,application/pdf" multiple hidden />
+            <span class="pdf-dropzone-icon">📄</span>
+            <strong>Soltá archivos .pdf acá</strong>
+            <span class="pdf-dropzone-sub">o hacé clic para seleccionarlos</span>
+          </label>
+
+          <button id="btn-lobby-scan" class="btn glass-btn btn-full">↻ Re-escanear Sets/</button>
+
+          <div id="upload-status" class="upload-status hidden"></div>
+        </aside>
+
+        <main class="lobby-main">
+          <div class="lobby-search-row">
+            <div class="lobby-search-wrap">
+              <span class="search-pill-icon" aria-hidden="true">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="11" cy="11" r="7"></circle>
+                  <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                </svg>
+              </span>
+              <input
+                id="lobby-search"
+                class="lobby-search"
+                type="search"
+                placeholder="..."
+                aria-label="Buscar sets"
+              />
+            </div>
+          </div>
+
+          <div id="lobby-sets-grid" class="lobby-sets-grid"></div>
+          <div id="lobby-empty" class="lobby-empty hidden">
+            No encontramos sets que coincidan con tu búsqueda.
+          </div>
+        </main>
+      </div>
+    </section>
+
+    <div id="slots-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="slots-modal-title">
+      <div class="modal-card">
+        <header class="modal-header">
+          <div class="modal-set-info">
+            <img id="slots-modal-cover" class="modal-cover hidden" alt="Portada del set" />
+            <div>
+              <h2 id="slots-modal-title" class="modal-title">Set</h2>
+              <p id="slots-modal-meta" class="modal-meta"></p>
+            </div>
+          </div>
+          <button id="btn-close-slots" class="btn-circle" title="Cerrar">✕</button>
+        </header>
+        <div class="modal-body">
+          <div id="slots-list" class="slots-list"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="join-room-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="join-room-title">
+      <div class="modal-card modal-card-sm">
+        <header class="modal-header">
+          <div>
+            <h2 id="join-room-title" class="modal-title">Unirse a una sala</h2>
+            <p class="modal-meta">Ingresá el código de 7 dígitos que te pasó tu amigo.</p>
+          </div>
+          <button id="btn-close-join-room" type="button" class="btn-circle" title="Cerrar">✕</button>
+        </header>
+        <form id="join-room-form" class="modal-body join-room-body">
+          <label class="field-group">
+            <span>Código de sala (7 dígitos)</span>
+            <input id="input-join-code" class="join-code-input" type="text" inputmode="numeric" maxlength="7" placeholder="4829103" autocomplete="off" required />
+          </label>
+          <label class="field-group">
+            <span>Tu nombre (opcional)</span>
+            <input id="input-join-name" class="join-name-input" type="text" maxlength="22" placeholder="Ej: Lucas" />
+          </label>
+          <div id="join-room-progress" class="join-room-progress hidden">
+            <span id="join-room-progress-text">Conectando a la sala...</span>
+            <div class="progress-track"><div id="join-room-progress-bar" class="progress-bar"></div></div>
+          </div>
+          <div id="join-room-error" class="upload-status is-error hidden"></div>
+          <div class="join-room-actions">
+            <button id="btn-cancel-join" type="button" class="btn glass-btn">Cancelar</button>
+            <button id="btn-submit-join" type="submit" class="btn btn-primary">Entrar a la sala</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div id="editor-app" class="editor-app hidden">
+      <main id="workspace" class="workspace">
+        <section class="viewport-wrap">
+          <div id="viewport" class="viewport"></div>
+          <div id="remote-cursors-layer" class="remote-cursors-layer" aria-hidden="true"></div>
+          <div id="selection-marquee" class="selection-marquee hidden"></div>
+
+          <!-- Barra flotante superior -->
+          <header id="topbar" class="topbar">
+            <div class="hud-top-left">
+              <button id="btn-back-lobby" class="btn-circle" title="Volver a la Sala de Juego">←</button>
+              <div class="top-progress-card">
+                <span class="lego-brick-badge is-yellow" aria-hidden="true"></span>
+                <div class="top-progress-meta">
+                  <span id="tray-summary" class="tray-summary">0 / 0 piezas</span>
+                  <div class="top-progress-track">
+                    <div id="top-progress-fill" class="top-progress-fill"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="hud-top-right">
+              <div id="room-status-chip" class="room-status-chip hidden"></div>
+              <button id="btn-drop-batch" class="btn glass-btn btn-accent hidden">Soltar +150</button>
+              <button id="btn-help" class="btn-circle" title="Controles">?</button>
+              <button id="btn-hide-hud" class="btn glass-btn" title="Tecla H">Ocultar HUD</button>
+            </div>
+          </header>
+
+          <!-- Píldora flotante discreta solo cuando hay una pieza o grupo en mano/seleccionado -->
+          <div id="status-pill" class="hud-pill hidden"></div>
+
+          <!-- Visor lateral izquierdo simplificado del manual PDF -->
+          <aside id="manual-drawer" class="manual-drawer" aria-label="Manual de instrucciones" title="Clic para ocultar manual">
+            <div class="manual-header">
+              <span id="manual-page-indicator" class="manual-page-indicator">Pág. - / -</span>
+              <div class="manual-header-right">
+                <button id="btn-manual-open-pdf" type="button" class="manual-open-btn" title="Abrir PDF en otra pestaña para llevarlo a otro monitor">Abrir PDF</button>
+                <span id="manual-zoom-badge" class="manual-zoom-badge">100%</span>
+              </div>
+            </div>
+            <div id="manual-viewport" class="manual-viewport">
+              <div id="manual-status" class="manual-status">Cargando manual...</div>
+              <div id="manual-pages" class="manual-pages"></div>
+            </div>
+          </aside>
+
+          <button id="manual-tab" type="button" class="manual-tab hidden" title="Mostrar manual de instrucciones">
+            <span>Manual</span>
+          </button>
+
+          <!-- Dock inferior flotante: Carrusel horizontal de piezas + barra de acciones -->
+          <div id="bottom-dock" class="bottom-dock">
+            <section id="tray-panel" class="tray-dock">
+              <div class="tray-dock-header">
+                <div class="tray-tabs" role="tablist">
+                  <button type="button" class="tray-tab is-active" data-tab="all">
+                    Piezas <span id="tray-tab-count" class="tab-count-badge">0</span>
+                  </button>
+                  <button type="button" class="tray-tab" data-tab="favorites">
+                    ★ Favoritas <span id="tray-fav-count" class="tab-count-badge">0</span>
+                  </button>
+                  <button type="button" class="tray-tab" data-tab="recent">
+                    ◷ Recientes
+                  </button>
+                </div>
+
+                <div class="tray-dock-filters">
+                  <div id="tray-bag-row" class="tray-bag-row hidden">
+                    <select id="tray-bag-filter" aria-label="Filtrar por bolsa">
+                      <option value="">Todas las bolsas</option>
+                    </select>
+                    <button id="btn-focus-bag" type="button" class="btn btn-sm" title="Centrar cámara en la bolsa">Ir a zona</button>
+                  </div>
+                  <label class="checkbox-row">
+                    <input id="tray-only-available" type="checkbox" checked />
+                    <span>Disponibles</span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="tray-carousel-wrap">
+                <button id="btn-tray-prev" type="button" class="carousel-arrow" title="Desplazar izquierda">‹</button>
+                <div id="tray-list" class="tray-list"></div>
+                <button id="btn-tray-next" type="button" class="carousel-arrow" title="Desplazar derecha">›</button>
+              </div>
+            </section>
+
+            <footer id="bottom-bar" class="bottom-bar">
+              <div class="bottom-left">
+                <div class="search-pill-wrap">
+                  <span class="search-pill-icon" aria-hidden="true">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                      <circle cx="11" cy="11" r="7"></circle>
+                      <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                    </svg>
+                  </span>
+                  <input id="tray-search" class="bottom-search" type="search" placeholder="Buscar pieza o color..." />
+                </div>
+              </div>
+
+              <div class="bottom-center-tools">
+                <button id="btn-toggle-manual" type="button" class="btn" title="Mostrar u ocultar manual">Manual</button>
+                <button id="btn-toggle-tray" type="button" class="btn is-on" title="Mostrar u ocultar barra de piezas">Piezas</button>
+                <button id="btn-fine-grid" class="btn" title="Tecla Q">Grilla 1 stud</button>
+                <button id="btn-fine-rot" class="btn" title="Tecla E">Giro 90°</button>
+                <button id="btn-auto-orient" class="btn is-on" title="Tecla U">Auto-orientar</button>
+                <button id="btn-collision" class="btn is-on" title="Tecla K">Colisiones</button>
+                <button id="btn-focus-mesa" type="button" class="btn" title="Centrar vista en la mesa">Centrar mesa</button>
+                <button id="btn-shake" class="btn" title="Espacio">Revolver</button>
+              </div>
+
+              <div class="bottom-actions">
+                <button
+                  id="btn-sticker-mode"
+                  type="button"
+                  class="btn-circle btn-sticker-tool"
+                  title="Pegar imagen en cara de pieza (Pegatina)"
+                  aria-pressed="false"
+                >
+                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path
+                      d="M12.2 19.5H5.2A2.7 2.7 0 0 1 2.5 16.8V6.7A2.7 2.7 0 0 1 5.2 4h12.6a2.7 2.7 0 0 1 2.7 2.7v5.2"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                    />
+                    <circle cx="8" cy="8.5" r="1.4" fill="currentColor" />
+                    <path
+                      d="M4.2 16.6l3.4-3.7a1.1 1.1 0 0 1 1.6 0l2.4 2.5 1.8-1.8a1.1 1.1 0 0 1 1.5-.1l.9.7"
+                      stroke="currentColor"
+                      stroke-width="1.9"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    />
+                    <circle cx="18.2" cy="17.8" r="4.3" fill="currentColor" />
+                    <path
+                      d="M18.2 15.9v3.8M16.3 17.8h3.8"
+                      stroke="#0f1726"
+                      stroke-width="1.9"
+                      stroke-linecap="round"
+                    />
+                  </svg>
+                </button>
+                <button
+                  id="btn-multiplayer"
+                  type="button"
+                  class="btn-circle btn-multiplayer-tool"
+                  title="Sala multijugador con amigos"
+                  aria-pressed="false"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                    <circle cx="12" cy="7.6" r="3.2" />
+                    <path d="M5.8 19.2c0-3.2 2.8-5.3 6.2-5.3s6.2 2.1 6.2 5.3H5.8Z" />
+                    <circle cx="5.7" cy="10" r="2.3" />
+                    <path d="M1.3 19.2c0-2 1.6-3.5 3.8-3.8a6.9 6.9 0 0 0-.9 3.8H1.3Z" />
+                    <circle cx="18.3" cy="10" r="2.3" />
+                    <path d="M19.8 19.2a6.9 6.9 0 0 0-.9-3.8c2.2.3 3.8 1.8 3.8 3.8h-2.9Z" />
+                  </svg>
+                </button>
+                <button id="btn-undo" class="btn glass-btn" title="Ctrl + Z">↶ Deshacer</button>
+                <button id="btn-clear-build" class="btn glass-btn btn-danger">↻ Reiniciar</button>
+                <button id="btn-export-build" class="btn glass-btn" title="Descargar archivo .json">↑ Exportar</button>
+                <label id="lbl-import-build" class="btn glass-btn btn-file" title="Importar archivo .json en este slot">
+                  ↓ Importar
+                  <input id="input-import-build" type="file" accept=".json" hidden />
+                </label>
+                <button id="btn-save-slot" class="btn btn-primary" title="Ctrl + S">💾 Guardar progreso</button>
+              </div>
+            </footer>
+          </div>
+
+          <!-- Barra de progreso para carga de sets grandes -->
+          <div id="progress-pill" class="progress-pill hidden">
+            <span id="progress-text">Cargando...</span>
+            <div class="progress-track"><div id="progress-bar" class="progress-bar"></div></div>
+          </div>
+
+          <!-- Botón flotante mínimo cuando el HUD está oculto (Tecla H) -->
+          <div id="minimal-controls" class="minimal-controls hidden">
+            <button id="btn-show-hud" class="btn-float" title="Tecla H">Mostrar HUD (H)</button>
+          </div>
+
+          <!-- Selector flotante para pegar o subir imagen en la cara clickeada -->
+          <div id="sticker-popover" class="sticker-popover hidden" role="dialog" aria-label="Colocar pegatina en cara">
+            <div class="sticker-popover-header">
+              <strong>Pegatina en cara</strong>
+              <button id="btn-close-sticker" type="button" class="btn btn-sm" title="Cancelar">✕</button>
+            </div>
+            <p class="sticker-popover-hint">Presioná <b>Ctrl + V</b> para pegar tu captura o elegí una imagen:</p>
+            <div class="sticker-popover-actions">
+              <button id="btn-sticker-paste" type="button" class="btn btn-accent">Pegar del portapapeles</button>
+              <label class="btn btn-file">
+                Subir imagen...
+                <input id="input-sticker-file" type="file" accept="image/*" hidden />
+              </label>
+            </div>
+          </div>
+
+          <!-- Guía de ayuda visual paginada (?) -->
+          <div id="help-guide-backdrop" class="hg-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="help-guide-title">
+            <div class="hg-stage">
+              <button id="btn-help-prev" type="button" class="hg-nav-btn hg-nav-prev is-hidden" aria-label="Página anterior" title="Anterior (←)">
+                ‹
+              </button>
+
+              <article class="hg-modal">
+                <header class="hg-header">
+                  <div class="hg-title-wrap">
+                    <span id="help-guide-kicker" class="hg-kicker">Guía rápida · 1 de 11</span>
+                    <h2 id="help-guide-title" class="hg-title">Tu mesa de armado</h2>
+                  </div>
+                  <button id="btn-close-help" type="button" class="btn-circle" aria-label="Cerrar guía" title="Cerrar (Esc)">✕</button>
+                </header>
+
+                <div id="help-guide-body" class="hg-body"></div>
+
+                <footer class="hg-footer">
+                  <div id="help-guide-dots" class="hg-dots" aria-label="Páginas de la guía"></div>
+                  <button id="btn-help-finish" type="button" class="btn btn-primary hidden">¡Entendido, a armar!</button>
+                </footer>
+              </article>
+
+              <button id="btn-help-next" type="button" class="hg-nav-btn hg-nav-next" aria-label="Página siguiente" title="Siguiente (→)">
+                ›
+              </button>
+            </div>
+          </div>
+
+          <!-- Modal de Sala Multijugador (Admin del slot) -->
+          <div id="room-modal-backdrop" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="room-modal-title">
+            <div class="modal-card modal-card-sm">
+              <header class="modal-header">
+                <div class="room-modal-head-left">
+                  <h2 id="room-modal-title" class="modal-title">Sala con amigos</h2>
+                  <span id="room-status-badge" class="room-status-pill">Sala cerrada</span>
+                </div>
+                <button id="btn-close-room-modal" type="button" class="btn-circle" title="Cerrar">✕</button>
+              </header>
+              <div class="modal-body room-modal-body">
+                <div class="room-control-row">
+                  <button id="btn-toggle-room" type="button" class="btn btn-primary">Abrir sala</button>
+                  <div id="room-code-box" class="room-code-box hidden">
+                    <span class="room-code-label">Código:</span>
+                    <strong id="room-code-text" class="room-code-text">0000000</strong>
+                    <button id="btn-copy-room-code" type="button" class="btn btn-sm">Copiar</button>
+                  </div>
+                </div>
+                <p id="room-modal-hint" class="room-hint"></p>
+                <div class="room-players-header">
+                  <strong>Jugadores en este slot</strong>
+                  <span id="room-players-count" class="room-players-count">1 / 4</span>
+                </div>
+                <div id="room-players-list" class="room-players-list"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast" class="toast"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
