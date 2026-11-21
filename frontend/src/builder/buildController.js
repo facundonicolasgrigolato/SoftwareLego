@@ -1466,31 +1466,104 @@ export class BuildController {
     const localUp = new THREE.Vector3(0, 1, 0).applyQuaternion(quat);
     const isStandardBaseDown = localUp.dot(dirNormal) > 0.85;
 
-    let supportDist;
-    let worldReceptors;
-
-    if (isStandardBaseDown) {
-      const defUnderside =
-        this.carry.mesh.userData.defaultSupportUndersideY ?? this.carry.localBox.min.y;
-      supportDist = -defUnderside;
-      const localReceptors = this.carry.mesh.userData.bottomReceptors || [
-        new THREE.Vector3(0, defUnderside, 0),
-      ];
-      worldReceptors = localReceptors.map((r) => r.clone().applyQuaternion(quat));
-    } else {
-      supportDist = computeSupportDistanceAlongDir(boxes, quat, dirNormal);
+    const { supportDist, worldReceptors, receptorsCenter } = (() => {
+      if (isStandardBaseDown) {
+        const defUnderside =
+          this.carry.mesh.userData.defaultSupportUndersideY ?? this.carry.localBox.min.y;
+        const dist = -defUnderside;
+        const localReceptors = this.carry.mesh.userData.bottomReceptors || [
+          new THREE.Vector3(0, defUnderside, 0),
+        ];
+        const recs = localReceptors.map((r) => r.clone().applyQuaternion(quat));
+        const rc = new THREE.Vector3();
+        for (const r of recs) rc.add(r);
+        rc.divideScalar(Math.max(1, recs.length));
+        return { supportDist: dist, worldReceptors: recs, receptorsCenter: rc };
+      }
+      const dist = computeSupportDistanceAlongDir(boxes, quat, dirNormal);
       const center = new THREE.Vector3();
       this.carry.ghostBox.getCenter(center);
-      worldReceptors = [center.addScaledVector(dirNormal, -supportDist - center.dot(dirNormal))];
-    }
-
-    const receptorsCenter = new THREE.Vector3();
-    for (const r of worldReceptors) {
-      receptorsCenter.add(r);
-    }
-    receptorsCenter.divideScalar(Math.max(1, worldReceptors.length));
-
+      const recs = [center.addScaledVector(dirNormal, -dist - center.dot(dirNormal))];
+      return { supportDist: dist, worldReceptors: recs, receptorsCenter: recs[0].clone() };
+    })();
     return { supportDist, worldReceptors, receptorsCenter };
+  }
+
+  /**
+   * Genera candidatos alineados contra una pared lateral o techo sin studs (`cardN`),
+   * respetando la grilla de la pieza tocada para encastrar en huecos cerrados.
+   */
+  _buildWallPocketCandidates(hit, cardN) {
+    if (!hit || hit.kind !== "placed") return [];
+    const pt = hit.point;
+    const step = this.fineGrid ? LDU_HALF_STUD : LDU_STUD;
+    const minAllowedY = -this.carry.ghostBox.min.y;
+    const boxes = this.carry.mesh.userData.collisionBoxes || [this.carry.localBox];
+    const ghostBox = this.carry.ghostBox;
+
+    const normalAxis =
+      Math.abs(cardN.x) > 0.5 ? "x" : Math.abs(cardN.y) > 0.5 ? "y" : "z";
+    const tangentAxes =
+      normalAxis === "y" ? ["x", "z"] : normalAxis === "x" ? ["y", "z"] : ["x", "y"];
+    const [ax0, ax1] = tangentAxes;
+
+    const wallDist = computeSupportDistanceAlongDir(boxes, this.carry.quaternion, cardN);
+    const center = new THREE.Vector3();
+    ghostBox.getCenter(center);
+    const desired = new THREE.Vector3().subVectors(pt, center);
+
+    const basePiece = this.placedPieces.find((p) => p.mesh === hit.object);
+    const baseWb = basePiece?.worldBox || hit.object?.userData?.worldBox;
+
+    const snapAxisToPiece = (ax, val) => {
+      if (!baseWb) {
+        return ax === "y"
+          ? Math.round(val / LDU_PLATE) * LDU_PLATE
+          : Math.round(val / step) * step;
+      }
+      return snapToReferenceCoord(val, ghostBox.min[ax], baseWb.min[ax], step);
+    };
+
+    const rawN = hit.normal || cardN;
+    const isFlatCardinalWall = rawN.dot(cardN) > 0.98;
+    const rawPlane =
+      pt[normalAxis] + cardN[normalAxis] * (wallDist + this.carry.manualOffsetY);
+    const normalPlane = isFlatCardinalWall
+      ? Math.round(rawPlane * 100) / 100
+      : Math.round(rawPlane / 4) * 4;
+
+    const baseCand = new THREE.Vector3();
+    baseCand[normalAxis] = normalPlane;
+    baseCand[ax0] = snapAxisToPiece(ax0, desired[ax0]);
+    baseCand[ax1] = snapAxisToPiece(ax1, desired[ax1]);
+
+    const cands = [];
+    const pushIfValidY = (v) => {
+      if (v.y < minAllowedY - 0.01) return;
+      if (v.y < minAllowedY) v.y = minAllowedY;
+      cands.push(v);
+    };
+
+    pushIfValidY(baseCand);
+
+    const offsets = [];
+    for (const ax of [ax0, ax1]) {
+      for (const delta of [-step, step]) {
+        const alt = baseCand.clone();
+        alt[ax] += delta;
+        offsets.push(alt);
+      }
+    }
+    if (normalAxis !== "y") {
+      for (const dy of [-LDU_PLATE, LDU_PLATE]) {
+        const alt = baseCand.clone();
+        alt.y += dy;
+        offsets.push(alt);
+      }
+    }
+    offsets.sort((a, b) => a.distanceToSquared(desired) - b.distanceToSquared(desired));
+    for (const o of offsets) pushIfValidY(o);
+    return cands;
   }
 
   /**
@@ -1762,6 +1835,13 @@ export class BuildController {
           }
         }
       }
+
+      // Si el stud más cercano ya está ocupado/bloqueado en un hueco lateral, probamos la pared tocada
+      if (hit.kind === "placed" && (Math.abs(cardN.y) < 0.5 || cardN.y < -0.5)) {
+        for (const wc of this._buildWallPocketCandidates(hit, cardN)) {
+          candList.push(wc);
+        }
+      }
     } else if (bestMech) {
       activeNormal = bestMech.targetDir;
       const snapPos = bestMech.position.clone();
@@ -1836,7 +1916,23 @@ export class BuildController {
           minAllowedY,
           surfaceY + supportDist + this.carry.manualOffsetY
         );
-        candList.push(new THREE.Vector3(snapped.x, y, snapped.z));
+        const floorCand = new THREE.Vector3(snapped.x, y, snapped.z);
+
+        const isWallOrCeiling = hit.kind === "placed" && (Math.abs(cardN.y) < 0.5 || cardN.y < -0.5);
+        if (isWallOrCeiling) {
+          const wallCands = this._buildWallPocketCandidates(hit, cardN);
+          const localUp = new THREE.Vector3(0, 1, 0).applyQuaternion(this.carry.quaternion);
+          const baseFacesWall = localUp.dot(cardN) > 0.7 || cardN.y < -0.5;
+          if (baseFacesWall) {
+            for (const wc of wallCands) candList.push(wc);
+            candList.push(floorCand);
+          } else {
+            candList.push(floorCand);
+            for (const wc of wallCands) candList.push(wc);
+          }
+        } else {
+          candList.push(floorCand);
+        }
       }
     }
 

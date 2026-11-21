@@ -145,6 +145,7 @@ export class LobbyView {
           playerName,
           onProgress: (done, total, label) => this._setJoinProgress(done, total, label),
         });
+        this.busyJoin = false;
         this.closeJoinModal(true);
       } catch (err) {
         this._setJoinProgress(0, 0, "");
@@ -412,7 +413,7 @@ export class LobbyView {
     this.activeModalSet = null;
     this.editingSlotNumber = null;
     if (this.joinModalEl && !this.joinModalEl.classList.contains("hidden")) {
-      this.closeJoinModal();
+      this.closeJoinModal(true);
     }
   }
 

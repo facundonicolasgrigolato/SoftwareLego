@@ -146,7 +146,67 @@ export class RoomDirectory {
 const DEFAULT_ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
+  { urls: "stun:stun2.l.google.com:19302" },
+  { urls: "stun:stun3.l.google.com:19302" },
 ];
+
+export const JSON_CHUNK_THRESHOLD = 28000;
+export const JSON_CHUNK_SIZE = 24000;
+
+/**
+ * Envía mensajes JSON grandes (ej. `world:snapshot` con cientos de piezas o pegatinas)
+ * fragmentados en trozos seguros para WebRTC SCTP, dejando intactos los mensajes chicos.
+ */
+export function sendLargeAwareJson(conn, msg) {
+  if (!conn?.open || !msg) return;
+  if (msg.type === "world:snapshot" || msg.type === "world:op" || msg.type === "world:action") {
+    const raw = JSON.stringify(msg);
+    if (raw.length > JSON_CHUNK_THRESHOLD) {
+      const chunkId = `jc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      const total = Math.ceil(raw.length / JSON_CHUNK_SIZE);
+      for (let i = 0; i < total; i += 1) {
+        conn.send({
+          type: "__json_chunk__",
+          chunkId,
+          index: i,
+          total,
+          data: raw.slice(i * JSON_CHUNK_SIZE, (i + 1) * JSON_CHUNK_SIZE),
+        });
+      }
+      return;
+    }
+  }
+  conn.send(msg);
+}
+
+/**
+ * Reensambla fragmentos `__json_chunk__` recibidos por PeerJS antes de procesarlos.
+ */
+export function createJsonChunkAssembler() {
+  const buckets = new Map();
+  return (msg) => {
+    if (!msg || typeof msg !== "object") return null;
+    if (msg.type !== "__json_chunk__") return msg;
+    const { chunkId, index, total, data } = msg;
+    if (!chunkId || typeof index !== "number" || !total || typeof data !== "string") return null;
+    let bucket = buckets.get(chunkId);
+    if (!bucket) {
+      bucket = { total, parts: new Array(total), received: 0 };
+      buckets.set(chunkId, bucket);
+    }
+    if (bucket.parts[index] === undefined) {
+      bucket.parts[index] = data;
+      bucket.received += 1;
+    }
+    if (bucket.received < bucket.total) return null;
+    buckets.delete(chunkId);
+    try {
+      return JSON.parse(bucket.parts.join(""));
+    } catch {
+      return null;
+    }
+  };
+}
 
 /**
  * Orquestador WebRTC P2P (`PeerJS`) para Host autoritativo e Invitados.
@@ -336,8 +396,10 @@ export class RoomManager {
       this.callbacks.onPlayerJoined?.(player);
     });
 
-    conn.on("data", (msg) => {
-      this._onHostDataFromGuest(guestId, conn, msg);
+    const unpackJson = createJsonChunkAssembler();
+    conn.on("data", (rawMsg) => {
+      const msg = unpackJson(rawMsg);
+      if (msg) this._onHostDataFromGuest(guestId, conn, msg);
     });
 
     const cleanup = () => {
@@ -373,7 +435,7 @@ export class RoomManager {
     if (msg.type === "bundle:ready") {
       const snapshot = this.callbacks.getWorldSnapshot?.();
       if (snapshot && conn.open) {
-        conn.send({
+        sendLargeAwareJson(conn, {
           type: "world:snapshot",
           snapshot,
           locks: this.directory.getLocksObject(),
@@ -428,7 +490,7 @@ export class RoomManager {
     for (const conn of this.guestConns.values()) {
       if (conn.open) {
         try {
-          conn.send(msg);
+          sendLargeAwareJson(conn, msg);
         } catch {
           // ignore
         }
@@ -501,42 +563,51 @@ export class RoomManager {
 
   closeRoom() {
     this._openCanceled = true;
-    if (this.role === "host") {
+    const prevRole = this.role;
+    const guestConns = [...this.guestConns.values()];
+    const hostConn = this.hostConn;
+    const peer = this.peer;
+
+    // Reseteamos estado antes de cerrar sockets para que `conn.on("close")` no dispare `onKickedOrClosed`
+    if (prevRole === "host") {
       this._broadcast({ type: "room:closed", reason: "El administrador cerró la sala." });
-      for (const conn of this.guestConns.values()) {
+    }
+    this.mode = "closed";
+    this.role = null;
+    this.roomCode = null;
+    this.localPeerId = null;
+    this.directory = null;
+    this.guestConns.clear();
+    this.hostConn = null;
+    this.peer = null;
+    this.remotePlayers = [];
+    this.remoteLocks.clear();
+    this._hostBundleMeta = null;
+
+    if (prevRole === "host") {
+      for (const conn of guestConns) {
         try {
           conn.close();
         } catch {
           // ignore
         }
       }
-      this.guestConns.clear();
-    } else if (this.hostConn) {
+    } else if (hostConn) {
       try {
-        this.hostConn.close();
+        hostConn.close();
       } catch {
         // ignore
       }
-      this.hostConn = null;
     }
 
-    if (this.peer) {
+    if (peer) {
       try {
-        this.peer.destroy();
+        peer.destroy();
       } catch {
         // ignore
       }
-      this.peer = null;
     }
 
-    this.mode = "closed";
-    this.role = null;
-    this.roomCode = null;
-    this.localPeerId = null;
-    this.directory = null;
-    this.remotePlayers = [];
-    this.remoteLocks.clear();
-    this._hostBundleMeta = null;
     this.callbacks.onLocksChanged?.(new Map());
     this.callbacks.onClearRemotePresence?.();
     this._emitState();
@@ -605,7 +676,9 @@ export class RoomManager {
         }
       });
 
-      conn.on("data", async (msg) => {
+      const unpackJson = createJsonChunkAssembler();
+      conn.on("data", async (rawMsg) => {
+        const msg = unpackJson(rawMsg);
         if (!msg || typeof msg !== "object") return;
 
         if (msg.type === "room:rejected") {
@@ -768,7 +841,7 @@ export class RoomManager {
 
   sendGuestAction(msg) {
     if (!this.isGuest() || !this.hostConn?.open) return;
-    this.hostConn.send(msg);
+    sendLargeAwareJson(this.hostConn, msg);
   }
 
   async requestLock(instanceIds) {

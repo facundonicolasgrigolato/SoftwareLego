@@ -1064,9 +1064,19 @@ async function joinRoomFromLobby({ code, playerName, onProgress }) {
   updateLayoutVisibility();
 
   await buildController.loadFromNetworkSnapshot(manifest, snapshot, { passivePhysics: true });
+  if (!roomManager.isGuest()) {
+    return;
+  }
   trayPanel.setManifest(manifest);
   manualDrawer.setOpen(false);
-  manualDrawer.setSet(currentSetNumber, manifest.source_pdf || "");
+  manualDrawer.setSet(currentSetNumber, manifest.source_pdf || setMeta.pdf_filename || "");
+  applyRolePermissions();
+  renderRoomStatusChip({
+    mode: roomManager.mode,
+    role: roomManager.role,
+    roomCode: roomManager.roomCode,
+    players: roomManager.getPlayers(),
+  });
   sceneManager.resetCamera();
   remotePresence.syncPlayersRoster(roomManager.getPlayers(), roomManager.localPeerId);
   remotePresence.updateLockBoxes(

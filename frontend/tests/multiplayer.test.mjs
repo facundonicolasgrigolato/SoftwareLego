@@ -5,9 +5,11 @@ import {
   ADMIN_ONLY_CONTROLS,
   MAX_ROOM_PLAYERS,
   RoomDirectory,
+  createJsonChunkAssembler,
   generateRoomCode,
   isValidRoomCode,
   normalizeRoomCode,
+  sendLargeAwareJson,
 } from "../src/net/roomManager.js";
 
 test("Códigos de sala de 7 dígitos y normalización", () => {
@@ -90,4 +92,34 @@ test("Controles exclusivos de Admin coinciden con el diseño", () => {
     [...ADMIN_ONLY_CONTROLS],
     ["sticker", "multiplayer", "undo", "clear", "export", "import", "save"]
   );
+});
+
+test("sendLargeAwareJson y createJsonChunkAssembler reensamblan snapshots grandes sin pérdida", () => {
+  const sent = [];
+  const fakeConn = { open: true, send: (m) => sent.push(m) };
+
+  // Mensaje pequeño pasa directo sin fragmentar
+  sendLargeAwareJson(fakeConn, { type: "world:op", op: "shake" });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].type, "world:op");
+
+  // Snapshot grande (> 28 KB) se fragmenta y reensambla idéntico
+  sent.length = 0;
+  const bigSticker = "data:image/png;base64," + "A".repeat(65000);
+  const bigMsg = {
+    type: "world:snapshot",
+    snapshot: { placed: [{ instanceId: "p1", stickers: [{ faceKey: "top", dataUrl: bigSticker }] }] },
+    locks: { p1: { peerId: "h", name: "Admin", color: "#38bdf8" } },
+  };
+  sendLargeAwareJson(fakeConn, bigMsg);
+  assert.ok(sent.length >= 3);
+  assert.equal(sent[0].type, "__json_chunk__");
+
+  const unpack = createJsonChunkAssembler();
+  let reassembled = null;
+  for (const frame of sent) {
+    const out = unpack(frame);
+    if (out) reassembled = out;
+  }
+  assert.deepEqual(reassembled, bigMsg);
 });
