@@ -2159,14 +2159,20 @@ export class BuildController {
           Math.max(18, hit.point.y + 12),
           hit.point.z
         );
-      } else {
-        // En modo invitado, arrastrar sobre la caja levanta la pieza directo para que pueda ubicarla
-        const entry = this._draggingPileEntry;
-        this._draggingPileEntry = null;
-        this._draggedCarryFromPress = true;
-        this._liftPileEntry(entry);
-        this._lastHit = hit;
-        this._updateCarryTransform();
+      } else if (this._isGuestRoom()) {
+        // En invitado delegamos el arrastre físico al Host para revolear/empujar con colisiones reales
+        const now = performance.now();
+        if (!this._lastGuestPileDragSentAt || now - this._lastGuestPileDragSentAt >= 32) {
+          this._lastGuestPileDragSentAt = now;
+          this.roomManager.sendGuestAction({
+            type: "guest:op",
+            op: "pile-drag",
+            instanceId: this._draggingPileEntry.instanceId,
+            x: Math.round(hit.point.x * 10) / 10,
+            y: Math.round(Math.max(18, hit.point.y + 12) * 10) / 10,
+            z: Math.round(hit.point.z * 10) / 10,
+          });
+        }
       }
       return;
     }

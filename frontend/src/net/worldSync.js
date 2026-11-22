@@ -196,6 +196,14 @@ export async function applyGuestOpOnHost(bc, msg) {
     return null;
   }
 
+  if (msg.op === "pile-drag") {
+    const entry = bc.pilePhysics.items.find((it) => it.instanceId === msg.instanceId);
+    if (entry && Number.isFinite(msg.x) && Number.isFinite(msg.y) && Number.isFinite(msg.z)) {
+      bc.pilePhysics.dragBodyToward(entry, msg.x, msg.y, msg.z);
+    }
+    return null;
+  }
+
   if (msg.op === "drop-batch") {
     await bc.dropNextBatch(msg.count || PILE_BATCH_SIZE);
     return null;

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ChunkAccumulator } from "../src/net/bundleTransfer.js";
+import { applyGuestOpOnHost } from "../src/net/worldSync.js";
 import {
   ADMIN_ONLY_CONTROLS,
   MAX_ROOM_PLAYERS,
@@ -122,4 +123,26 @@ test("sendLargeAwareJson y createJsonChunkAssembler reensamblan snapshots grande
     if (out) reassembled = out;
   }
   assert.deepEqual(reassembled, bigMsg);
+});
+
+test("applyGuestOpOnHost delega pile-drag al cuerpo físico en la pila del Host", async () => {
+  const dragCalls = [];
+  const fakeEntry = { instanceId: "pile_42" };
+  const fakeBc = {
+    pilePhysics: {
+      items: [fakeEntry],
+      dragBodyToward: (entry, x, y, z) => dragCalls.push({ entry, x, y, z }),
+    },
+  };
+  const res = await applyGuestOpOnHost(fakeBc, {
+    type: "guest:op",
+    op: "pile-drag",
+    instanceId: "pile_42",
+    x: -120,
+    y: 28,
+    z: 45,
+  });
+  assert.equal(res, null);
+  assert.equal(dragCalls.length, 1);
+  assert.deepEqual(dragCalls[0], { entry: fakeEntry, x: -120, y: 28, z: 45 });
 });
