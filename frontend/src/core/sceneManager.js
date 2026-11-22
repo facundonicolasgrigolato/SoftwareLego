@@ -40,6 +40,13 @@ export class SceneManager {
     this.controls.maxPolarAngle = Math.PI / 2 - 0.03;
     this.controls.minDistance = 80;
     this.controls.maxDistance = 3600;
+    this.isCameraInteracting = false;
+    this.controls.addEventListener("start", () => {
+      this.isCameraInteracting = true;
+    });
+    this.controls.addEventListener("end", () => {
+      this.isCameraInteracting = false;
+    });
 
     this.placedGroup = new THREE.Group();
     this.placedGroup.name = "PlacedPieces";
@@ -558,6 +565,7 @@ export class SceneManager {
         !hasChildMesh && obj.userData?.worldBox
           ? new THREE.Box3Helper(obj.userData.worldBox, 0x38bdf8)
           : new THREE.BoxHelper(obj, 0x38bdf8);
+      helper.userData.targetObj = obj;
       this.scene.add(helper);
       this._selectionHelpers.push(helper);
     }
@@ -566,6 +574,10 @@ export class SceneManager {
   refreshSelectionBox() {
     if (!this._selectionHelpers) return;
     for (const h of this._selectionHelpers) {
+      const obj = h.userData?.targetObj;
+      if (h.isBox3Helper && obj?.userData?.worldBox) {
+        h.box.copy(obj.userData.worldBox);
+      }
       if (typeof h.update === "function") h.update();
     }
   }
@@ -578,7 +590,16 @@ export class SceneManager {
     const fwd = new THREE.Vector3();
     this.camera.getWorldDirection(fwd);
     fwd.y = 0;
-    if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1);
+    if (fwd.lengthSq() < 1e-4) {
+      const camRight = new THREE.Vector3().setFromMatrixColumn(this.camera.matrixWorld, 0);
+      camRight.y = 0;
+      if (camRight.lengthSq() >= 1e-4) {
+        camRight.normalize();
+        fwd.crossVectors(new THREE.Vector3(0, 1, 0), camRight);
+      } else {
+        fwd.set(0, 0, -1);
+      }
+    }
     fwd.normalize();
 
     const forward =

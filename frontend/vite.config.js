@@ -250,9 +250,11 @@ function listAvailableSets() {
           filename,
           set_number: setNumber,
           set_name: raw.set_name || filename,
+          source_pdf: raw.source_pdf || null,
           total_pieces: raw.stats?.total_pieces ?? 0,
           resolved_pieces: raw.stats?.resolved_pieces ?? 0,
           coverage_percent: raw.stats?.coverage_percent ?? 0,
+          unresolved_summary: raw.stats?.unresolved_summary || null,
           cover_url: fs.existsSync(coverPath) ? `/covers/${encodeURIComponent(setNumber)}.png` : null,
           saves_count: slots.filter((s) => s.exists).length,
         };
@@ -444,6 +446,56 @@ function attachLocalMiddlewares(server) {
             output: result.stdout,
             error: result.ok ? "" : failSummary || "No se pudo procesar la carpeta Sets/.",
           });
+          return;
+        }
+
+        if (reqUrl === "/api/rescan-set" && req.method === "POST") {
+          try {
+            const bodyBuf = await readRequestBuffer(req, 64 * 1024);
+            const body = JSON.parse(bodyBuf.toString("utf-8") || "{}");
+            const setNum = sanitizeId(body.set_number);
+            let pdfName = String(body.source_pdf || "").trim();
+            if (!pdfName && setNum) {
+              const jsonPath = path.join(OUTPUT_SETS_DIR, `${setNum}.json`);
+              if (fs.existsSync(jsonPath)) {
+                try {
+                  const manifest = JSON.parse(fs.readFileSync(jsonPath, "utf-8"));
+                  if (manifest?.source_pdf) pdfName = manifest.source_pdf;
+                } catch {
+                  // fallback más abajo
+                }
+              }
+            }
+            let pdfTarget = pdfName ? resolveSafeChild(SETS_DIR, path.basename(pdfName)) : null;
+            if ((!pdfTarget || !fs.existsSync(pdfTarget.target)) && setNum) {
+              const fallback = resolveSafeChild(SETS_DIR, `${setNum}.pdf`);
+              if (fallback && fs.existsSync(fallback.target)) pdfTarget = fallback;
+            }
+            if (!pdfTarget || !fs.existsSync(pdfTarget.target)) {
+              sendJson(res, 404, {
+                ok: false,
+                error: "No se encontró el archivo PDF original de este set en Sets/.",
+              });
+              return;
+            }
+
+            const result = await runProcessSet([pdfTarget.target]);
+            clearManualCaches();
+            const sets = listAvailableSets();
+            const updatedSet = sets.find((s) => s.set_number === setNum) || null;
+            const failSummary = (result.failed || [])
+              .map((f) => `${f.filename}: ${f.reason}`)
+              .join(" | ");
+            sendJson(res, result.ok ? 200 : 422, {
+              ok: result.ok,
+              sets,
+              set: updatedSet,
+              failed: result.failed || [],
+              error: result.ok ? "" : failSummary || "No se pudo re-escanear el PDF del set.",
+            });
+          } catch (err) {
+            sendJson(res, 500, { ok: false, error: err.message });
+          }
           return;
         }
 

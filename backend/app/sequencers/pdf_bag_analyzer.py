@@ -248,28 +248,62 @@ def analyze_pdf_bags(
         remaining: dict[str, int] = dict(part_quantities)
         assignments: dict[str, dict[str, int]] = {}
         bom_set = set(inventory_pages)
+        total_target = sum(part_quantities.values())
 
-        # 2. Recorrer bolsas en orden y asignar piezas según las miniaturas de cada paso
+        # Precalculamos peso por bolsa (cantidad de callouts de paso) para equilibrar presupuestos reales
+        bag_pages_cache: dict[str, list[tuple[list[tuple[Any, int]], list[dict[str, Any]], dict[int, int]]]] = {}
+        bag_weights: dict[str, int] = {}
         for bag in bag_ranges:
             bag_key = str(bag.bag_number)
+            page_entries: list[tuple[list[tuple[Any, int]], list[dict[str, Any]], dict[int, int]]] = []
+            call_sum = 0
             for p_1idx in range(bag.start_page_1idx, bag.end_page_1idx + 1):
                 if p_1idx in bom_set:
                     continue
                 page = doc[p_1idx - 1]
                 words = page.get_text("words")
-                qty_words = [w for w in words if CALLOUT_QTY_RE.match(w[4])]
-                if not qty_words:
+                parsed_qws: list[tuple[Any, int]] = []
+                for w in words:
+                    m = CALLOUT_QTY_RE.match(w[4])
+                    if not m:
+                        continue
+                    q = int(m.group(1))
+                    if q > 0:
+                        parsed_qws.append((w, q))
+                        call_sum += q
+                if not parsed_qws:
                     continue
                 imgs = page.get_image_info(xrefs=True)
                 xref_smask = {img[0]: img[1] for img in page.get_images(full=True)}
+                page_entries.append((parsed_qws, imgs, xref_smask))
+            bag_pages_cache[bag_key] = page_entries
+            bag_weights[bag_key] = call_sum if call_sum > 0 else max(1, bag.end_page_1idx - bag.start_page_1idx + 1)
 
-                for qw in qty_words:
-                    m = CALLOUT_QTY_RE.match(qw[4])
-                    if not m:
-                        continue
-                    call_qty = int(m.group(1))
-                    if call_qty <= 0:
-                        continue
+        weight_sum = max(1, sum(bag_weights.values()))
+        raw_budgets = {
+            bk: (total_target * bag_weights[bk]) / weight_sum for bk in bag_weights
+        }
+        bag_budgets = {bk: int(val) for bk, val in raw_budgets.items()}
+        leftover_budget = total_target - sum(bag_budgets.values())
+        for bk in sorted(bag_weights.keys(), key=lambda k: raw_budgets[k] - bag_budgets[k], reverse=True):
+            if leftover_budget <= 0:
+                break
+            bag_budgets[bk] += 1
+            leftover_budget -= 1
+
+        bag_totals = {str(b.bag_number): 0 for b in bag_ranges}
+
+        # 2. Recorrer bolsas en orden respetando el presupuesto proporcional de cada bolsa
+        for bag in bag_ranges:
+            bag_key = str(bag.bag_number)
+            bag_cap = bag_budgets.get(bag_key, total_target)
+            for parsed_qws, imgs, xref_smask in bag_pages_cache.get(bag_key, []):
+                if bag_totals[bag_key] >= bag_cap:
+                    break
+                for qw, call_qty in parsed_qws:
+                    room = bag_cap - bag_totals[bag_key]
+                    if room <= 0:
+                        break
                     img_info = _find_image_above_word(qw[:4], imgs, max_width_pt=115.0, max_height_pt=105.0)
                     if not img_info:
                         continue
@@ -288,7 +322,6 @@ def analyze_pdf_bags(
                             continue
                         for bsig in sig_list:
                             dist = _signature_distance(step_sig, bsig)
-                            # Pequeña penalización si el paso pide más cantidad que la restante en BOM
                             if call_qty > rem:
                                 dist += 12.0
                             if dist < best_dist:
@@ -296,41 +329,44 @@ def analyze_pdf_bags(
                                 best_eid = eid
 
                     if best_eid and best_dist <= 65.0:
-                        take = min(call_qty, remaining[best_eid])
+                        take = min(call_qty, remaining[best_eid], room)
                         if take > 0:
                             remaining[best_eid] -= take
                             per_bag = assignments.setdefault(best_eid, {})
                             per_bag[bag_key] = per_bag.get(bag_key, 0) + take
+                            bag_totals[bag_key] += take
 
-        # 3. Repartir remanentes no matcheados entre bolsas siguiendo sus pesos relativos
-        bag_totals = {str(b.bag_number): 0 for b in bag_ranges}
-        for per_bag in assignments.values():
-            for bk, q in per_bag.items():
-                bag_totals[bk] = bag_totals.get(bk, 0) + q
+        # 3. Repartir remanentes completando bolsas por debajo de su presupuesto y manteniendo juntas las copias si entran
+        ordered_bags = [str(b.bag_number) for b in bag_ranges]
+        for eid, rem in remaining.items():
+            if rem <= 0:
+                continue
+            # Si todas las copias restantes caben en una sola bolsa con déficit (o margen <= 20), las agrupamos juntas
+            single_target = None
+            for bk in ordered_bags:
+                deficit = bag_budgets[bk] - bag_totals[bk]
+                if deficit >= rem or (deficit > 0 and rem - deficit <= 20 and sum(max(0, bag_budgets[b] - bag_totals[b]) for b in ordered_bags) >= rem):
+                    single_target = bk
+                    break
+            if single_target is not None:
+                per_bag = assignments.setdefault(eid, {})
+                per_bag[single_target] = per_bag.get(single_target, 0) + rem
+                bag_totals[single_target] += rem
+                remaining[eid] = 0
+                continue
 
-        total_assigned = sum(bag_totals.values())
-        if total_assigned > 0:
-            # Llenar las bolsas que quedaron más livianas respecto al promedio del set
-            total_target = sum(part_quantities.values())
-            avg_per_bag = max(1.0, total_target / len(bag_ranges))
-            ordered_bags = [str(b.bag_number) for b in bag_ranges]
-            cursor = 0
-            for eid, rem in remaining.items():
-                while rem > 0:
-                    # Elegir la bolsa por debajo del promedio, o rotar ordenadamente
-                    chosen = None
-                    for offset in range(len(ordered_bags)):
-                        bk = ordered_bags[(cursor + offset) % len(ordered_bags)]
-                        if bag_totals[bk] < avg_per_bag:
-                            chosen = bk
-                            cursor = (cursor + offset + 1) % len(ordered_bags)
-                            break
-                    if chosen is None:
-                        chosen = ordered_bags[cursor % len(ordered_bags)]
-                        cursor += 1
-                    per_bag = assignments.setdefault(eid, {})
-                    per_bag[chosen] = per_bag.get(chosen, 0) + 1
-                    bag_totals[chosen] += 1
-                    rem -= 1
+            while rem > 0:
+                needy = [bk for bk in ordered_bags if bag_totals[bk] < bag_budgets[bk]]
+                if needy:
+                    chosen = max(needy, key=lambda bk: bag_budgets[bk] - bag_totals[bk])
+                    chunk = min(rem, bag_budgets[chosen] - bag_totals[chosen])
+                else:
+                    chosen = min(ordered_bags, key=lambda bk: bag_totals[bk])
+                    chunk = rem
+                per_bag = assignments.setdefault(eid, {})
+                per_bag[chosen] = per_bag.get(chosen, 0) + chunk
+                bag_totals[chosen] += chunk
+                rem -= chunk
+            remaining[eid] = 0
 
     return bag_ranges, assignments

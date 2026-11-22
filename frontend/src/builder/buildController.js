@@ -186,11 +186,16 @@ export class BuildController {
 
   _refreshPlacedWorldBox(piece) {
     const boxes = piece.mesh.userData.collisionBoxes || [piece.localBox];
-    piece.worldBox = computeTransformedWorldBox(
+    const nextBox = computeTransformedWorldBox(
       boxes,
       piece.mesh.position,
       piece.mesh.quaternion
     );
+    if (piece.worldBox?.isBox3) {
+      piece.worldBox.copy(nextBox);
+    } else {
+      piece.worldBox = nextBox;
+    }
     piece.mesh.userData.worldBox = piece.worldBox;
     this.sceneManager.syncPlacedTransform(piece.mesh);
   }
@@ -1124,6 +1129,7 @@ export class BuildController {
 
     return {
       pivotPos,
+      groupWorldBox,
       entries,
       localBox,
       compositeBoxes,
@@ -1526,8 +1532,7 @@ export class BuildController {
 
     const rawN = hit.normal || cardN;
     const isFlatCardinalWall = rawN.dot(cardN) > 0.98;
-    const rawPlane =
-      pt[normalAxis] + cardN[normalAxis] * (wallDist + this.carry.manualOffsetY);
+    const rawPlane = pt[normalAxis] + cardN[normalAxis] * wallDist;
     const normalPlane = isFlatCardinalWall
       ? Math.round(rawPlane * 100) / 100
       : Math.round(rawPlane / 4) * 4;
@@ -1781,8 +1786,7 @@ export class BuildController {
       for (const refR of uniqueReceptors) {
         const cand = new THREE.Vector3();
         cand[normalAxis] =
-          bestStud.studPos[normalAxis] +
-          activeNormal[normalAxis] * (supportDist + this.carry.manualOffsetY);
+          bestStud.studPos[normalAxis] + activeNormal[normalAxis] * supportDist;
         cand[ax0] =
           span0 <= LDU_STUD + 2
             ? bestStud.studPos[ax0] - refR[ax0]
@@ -1892,7 +1896,7 @@ export class BuildController {
           (baseWb?.max.y ?? pt.y) + 2,
           ignoreMesh
         );
-        const y = Math.max(minAllowedY, supportedY + supportDist + this.carry.manualOffsetY);
+        const y = Math.max(minAllowedY, supportedY + supportDist);
         candList.push(new THREE.Vector3(x, y, z));
       } else {
         const snapped = snapXZ(pt.x, pt.z, {
@@ -1912,10 +1916,7 @@ export class BuildController {
                 pt.y + 2,
                 ignoreMesh
               );
-        const y = Math.max(
-          minAllowedY,
-          surfaceY + supportDist + this.carry.manualOffsetY
-        );
+        const y = Math.max(minAllowedY, surfaceY + supportDist);
         const floorCand = new THREE.Vector3(snapped.x, y, snapped.z);
 
         const isWallOrCeiling = hit.kind === "placed" && (Math.abs(cardN.y) < 0.5 || cardN.y < -0.5);
@@ -1936,9 +1937,10 @@ export class BuildController {
       }
     }
 
-    if (this.carry.manualOffsetX || this.carry.manualOffsetZ) {
+    if (this.carry.manualOffsetX || this.carry.manualOffsetY || this.carry.manualOffsetZ) {
       for (const cand of candList) {
         cand.x += this.carry.manualOffsetX;
+        cand.y = Math.max(minAllowedY, cand.y + this.carry.manualOffsetY);
         cand.z += this.carry.manualOffsetZ;
       }
     }
@@ -1947,7 +1949,7 @@ export class BuildController {
       candList[0] ||
       new THREE.Vector3(
         pt.x + this.carry.manualOffsetX,
-        Math.max(minAllowedY, pt.y),
+        Math.max(minAllowedY, pt.y + this.carry.manualOffsetY),
         pt.z + this.carry.manualOffsetZ
       );
 
@@ -2128,7 +2130,7 @@ export class BuildController {
     return false;
   }
 
-  handlePointerMove(clientX, clientY) {
+  handlePointerMove(clientX, clientY, buttons = 0) {
     if (this._rightDrag) {
       this._handleRightDragMove(clientX, clientY);
       return;
@@ -2178,6 +2180,12 @@ export class BuildController {
     }
 
     if (this.carry) {
+      // Mientras el usuario mantiene presionado para orbitar/panear la cámara, congelamos el fantasma
+      const isCameraDrag =
+        Boolean(this.sceneManager.isCameraInteracting) ||
+        ((buttons & 1) !== 0 && !this._draggedCarryFromPress) ||
+        (buttons & 4) !== 0;
+      if (isCameraDrag) return;
       const ignoreMesh = this.carry.ignoreSet || this.carry.origPlaced?.mesh || null;
       const hit = this.sceneManager.raycastWorkspace(clientX, clientY, {
         ignoreObject: ignoreMesh,
@@ -2681,6 +2689,16 @@ export class BuildController {
     return true;
   }
 
+  _getCameraAxes() {
+    if (typeof this.sceneManager?.getHorizontalCameraAxes === "function") {
+      return this.sceneManager.getHorizontalCameraAxes();
+    }
+    return {
+      right: WORLD_X.clone(),
+      forward: new THREE.Vector3(0, 0, -1),
+    };
+  }
+
   _handleRightDragMove(clientX, clientY) {
     if (!this._rightDrag) return;
     this._rightDrag.accumX += clientX - this._rightDrag.lastX;
@@ -2689,14 +2707,17 @@ export class BuildController {
     this._rightDrag.lastY = clientY;
 
     if (Math.abs(this._rightDrag.accumX) >= ROTATE_DRAG_THRESHOLD_PX) {
+      // Derecha -> como T (+1 en Y); Izquierda -> como R (-1 en Y)
       const dir = this._rightDrag.accumX > 0 ? 1 : -1;
-      this.rotateActive("y", -dir);
+      this.rotateActive("y", dir);
       // Limita a un paso por gesto brusco y evita mezcla accidental con el eje perpendicular
       this._rightDrag.accumX = 0;
       this._rightDrag.accumY = 0;
     } else if (Math.abs(this._rightDrag.accumY) >= ROTATE_DRAG_THRESHOLD_PX) {
+      // Arriba -> como G (-1 sobre eje derecho de cámara); Abajo -> como F (+1)
       const dir = this._rightDrag.accumY > 0 ? 1 : -1;
-      this.rotateActive("x", dir);
+      const { right } = this._getCameraAxes();
+      this.rotateActive(right, dir);
       this._rightDrag.accumX = 0;
       this._rightDrag.accumY = 0;
     }
@@ -2709,19 +2730,26 @@ export class BuildController {
     this.sceneManager.controls.enableRotate = true;
   }
 
-  rotateActive(axis, direction = 1) {
+  rotateActive(axisOrVec, direction = 1) {
     const step = this.fineRotation ? ROTATION_STEP_15 : ROTATION_STEP_90;
     const delta = step * direction;
-    const worldAxis = axis === "x" ? WORLD_X : axis === "y" ? WORLD_Y : WORLD_Z;
+    const worldAxis = axisOrVec?.isVector3
+      ? axisOrVec.clone().normalize()
+      : axisOrVec === "x"
+        ? WORLD_X
+        : axisOrVec === "y"
+          ? WORLD_Y
+          : WORLD_Z;
+    const isVerticalY = Math.abs(worldAxis.y) > 0.9;
 
     if (this.carry) {
-      if (this.autoOrient && !this.carry.manualTiltApplied && axis === "y") {
+      if (this.autoOrient && !this.carry.manualTiltApplied && isVerticalY) {
         this.carry.spinAngle = snapAngle(this.carry.spinAngle + delta, step);
         if (!this.carry.activeMechKind) {
           this._applyAutoOrientation(this.carry.surfaceNormal);
         }
       } else {
-        if (axis !== "y" || !this.autoOrient) {
+        if (!isVerticalY || !this.autoOrient) {
           this.carry.manualTiltApplied = true;
         }
         const qDelta = new THREE.Quaternion().setFromAxisAngle(worldAxis, delta);
@@ -2738,11 +2766,18 @@ export class BuildController {
       const meta = this._buildGroupCompositeData(items);
       const qDelta = new THREE.Quaternion().setFromAxisAngle(worldAxis, delta);
       const ignoreSet = new Set(items.map((p) => p.mesh));
-      const nextOrigin = meta.pivotPos.clone();
+      const gCenter = meta.groupWorldBox.getCenter(new THREE.Vector3());
+      const useCenterPivot = !isVerticalY;
+      const nextOrigin = useCenterPivot
+        ? meta.pivotPos.clone().sub(gCenter).applyQuaternion(qDelta).add(gCenter)
+        : meta.pivotPos.clone();
 
-      // Si al voltear el grupo alguna parte bajaría por debajo de la mesa, compensamos en Y
       const rotatedBox = computeTransformedWorldBox(meta.compositeBoxes, nextOrigin, qDelta);
-      if (rotatedBox.min.y < -0.01) {
+      if (useCenterPivot) {
+        // Mantiene la base del grupo a la misma altura (piso >= 0) al voltear para evitar deriva al repetir arriba/abajo
+        const targetMinY = Math.max(0, meta.groupWorldBox.min.y);
+        nextOrigin.y += targetMinY - rotatedBox.min.y;
+      } else if (rotatedBox.min.y < -0.01) {
         nextOrigin.y += Math.ceil((-rotatedBox.min.y - 0.01) / LDU_PLATE) * LDU_PLATE;
       }
 
@@ -2789,12 +2824,27 @@ export class BuildController {
 
     if (this.selected?.kind === "placed") {
       const piece = this.selected.item;
+      const prevPos = piece.mesh.position.clone();
       const prevRot = piece.mesh.rotation.clone();
       const prevQuat = piece.mesh.quaternion.clone();
-      const qDelta = new THREE.Quaternion().setFromAxisAngle(worldAxis, delta);
-      piece.mesh.quaternion.premultiply(qDelta).normalize();
-
       const boxes = piece.mesh.userData.collisionBoxes || [piece.localBox];
+      const prevBox =
+        piece.worldBox?.clone() || computeTransformedWorldBox(boxes, prevPos, prevQuat);
+      const qDelta = new THREE.Quaternion().setFromAxisAngle(worldAxis, delta);
+      const nextQuat = prevQuat.clone().premultiply(qDelta).normalize();
+      const nextPos = prevPos.clone();
+
+      if (!isVerticalY) {
+        const wCenter = prevBox.getCenter(new THREE.Vector3());
+        nextPos.sub(wCenter).applyQuaternion(qDelta).add(wCenter);
+        const rotBox = computeTransformedWorldBox(boxes, nextPos, nextQuat);
+        const targetMinY = Math.max(0, prevBox.min.y);
+        nextPos.y += targetMinY - rotBox.min.y;
+      }
+
+      piece.mesh.position.copy(nextPos);
+      piece.mesh.quaternion.copy(nextQuat);
+
       const meshData = piece.mesh.userData.collisionMeshData || null;
       if (
         this.collisionEnabled &&
@@ -2808,6 +2858,7 @@ export class BuildController {
           meshData
         )
       ) {
+        piece.mesh.position.copy(prevPos);
         piece.mesh.quaternion.copy(prevQuat);
         this.callbacks.onToast?.("No hay espacio para rotar ahí.");
         return;
@@ -2826,7 +2877,7 @@ export class BuildController {
         this.history.push({
           type: "move",
           instanceId: piece.instanceId,
-          prevState: { position: piece.mesh.position.clone(), rotation: prevRot },
+          prevState: { position: prevPos, rotation: prevRot },
           newState: {
             position: piece.mesh.position.clone(),
             rotation: piece.mesh.rotation.clone(),

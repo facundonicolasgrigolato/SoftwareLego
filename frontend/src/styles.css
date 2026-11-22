@@ -163,6 +163,8 @@ select {
   box-shadow: 0 14px 36px rgba(0, 0, 0, 0.48);
   overflow: hidden;
   cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
   transition: transform 0.22s ease, opacity 0.2s ease, bottom 0.18s ease;
 }
 
@@ -251,11 +253,13 @@ select {
 
 .manual-viewport.is-zoomed {
   cursor: grab;
+  touch-action: none;
 }
 
 .manual-viewport.is-panning {
   cursor: grabbing;
   user-select: none;
+  touch-action: none;
 }
 
 .manual-pages {
@@ -2224,6 +2228,41 @@ input[type="search"] {
   margin: 0;
   font-size: 16px;
   color: #f8fafc;
+}
+
+.modal-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.modal-notice {
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  background: rgba(30, 41, 59, 0.72);
+  color: #e2e8f0;
+}
+
+.modal-notice.is-warning {
+  border-color: rgba(251, 191, 36, 0.45);
+  background: rgba(120, 53, 15, 0.35);
+  color: #fde68a;
+}
+
+.modal-notice.is-success {
+  border-color: rgba(52, 211, 153, 0.45);
+  background: rgba(6, 78, 59, 0.35);
+  color: #a7f3d0;
+}
+
+.modal-notice.is-error {
+  border-color: rgba(248, 113, 113, 0.45);
+  background: rgba(127, 29, 29, 0.38);
+  color: #fecaca;
 }
 
 .modal-meta {

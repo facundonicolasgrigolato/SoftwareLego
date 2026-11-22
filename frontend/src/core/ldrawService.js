@@ -205,6 +205,37 @@ export class LDrawService {
   }
 
   /**
+   * Invierte el orden de los vértices de cada triángulo `[i, i+1, i+2] -> [i, i+2, i+1]`
+   * en una geometría no indexada, necesario tras aplicar una transformación espejo (`det < 0`).
+   */
+  static _reverseTriangleWinding(geo) {
+    const attrs = [
+      geo.attributes.position,
+      geo.attributes.normal,
+      geo.attributes.color,
+    ].filter(Boolean);
+    const count = geo.attributes.position?.count || 0;
+    for (let i = 0; i + 2 < count; i += 3) {
+      const j = i + 1;
+      const k = i + 2;
+      for (const attr of attrs) {
+        const itemSize = attr.itemSize;
+        const arr = attr.array;
+        const baseJ = j * itemSize;
+        const baseK = k * itemSize;
+        for (let d = 0; d < itemSize; d += 1) {
+          const tmp = arr[baseJ + d];
+          arr[baseJ + d] = arr[baseK + d];
+          arr[baseK + d] = tmp;
+        }
+      }
+    }
+    for (const attr of attrs) {
+      attr.needsUpdate = true;
+    }
+  }
+
+  /**
    * Fusiona todas las mallas opacas y líneas de borde de un prototipo en un par de
    * geometrías planas (`batchedMeshGeo`, `batchedEdgeGeo`) listas para `BatchedPieceLayer`.
    */
@@ -231,6 +262,9 @@ export class LDrawService {
         relMat.multiplyMatrices(invRoot, child.matrixWorld);
         const geo = child.geometry.index ? child.geometry.toNonIndexed() : child.geometry.clone();
         geo.applyMatrix4(relMat);
+        if (relMat.determinant() < 0) {
+          LDrawService._reverseTriangleWinding(geo);
+        }
         if (!geo.attributes.normal) geo.computeVertexNormals();
 
         const posCount = geo.attributes.position.count;

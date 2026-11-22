@@ -44,6 +44,10 @@ function createFakeEl(initialClasses = []) {
       if (!listeners.has(type)) listeners.set(type, []);
       listeners.get(type).push(fn);
     },
+    dispatchEvent(type, ev = {}) {
+      const payload = { target: el, ...ev };
+      for (const fn of listeners.get(type) || []) fn(payload);
+    },
     click() {
       for (const fn of listeners.get("click") || []) fn({ target: el });
     },
@@ -161,6 +165,73 @@ test("ManualDrawer arranca cerrado por defecto al iniciar", () => {
     assert.equal(drawer.isOpen, false);
     assert.equal(drawerEl.classList.contains("is-collapsed"), true);
     assert.equal(tabEl.classList.contains("hidden"), false);
+  } finally {
+    globalThis.window = prevWin;
+  }
+});
+
+test("ManualDrawer oculta con click pero NO al arrastrar, soltar rápido o usar scrollbars", () => {
+  const prevWin = globalThis.window;
+  const winListeners = new Map();
+  globalThis.window = {
+    addEventListener(type, fn) {
+      if (!winListeners.has(type)) winListeners.set(type, []);
+      winListeners.get(type).push(fn);
+    },
+  };
+  const emitWin = (type, ev) => {
+    const payload = { type, ...ev };
+    for (const fn of winListeners.get(type) || []) fn(payload);
+  };
+  try {
+    const drawerEl = createFakeEl();
+    const tabEl = createFakeEl(["hidden"]);
+    const viewportEl = createFakeEl();
+    viewportEl.scrollLeft = 0;
+    viewportEl.scrollTop = 50;
+    viewportEl.clientWidth = 320;
+    viewportEl.clientHeight = 400;
+    viewportEl.scrollWidth = 640;
+    viewportEl.scrollHeight = 1200;
+    viewportEl.getBoundingClientRect = () => ({ left: 14, top: 64, width: 336, height: 416 });
+
+    const drawer = new ManualDrawer({ drawerEl, tabEl, viewportEl });
+    drawer.zoom = 1.6;
+    drawer.setOpen(true);
+
+    // 1. Arrastrar sobre el PDF y soltar (incluso volviendo cerca del inicio) NO cierra
+    drawerEl.dispatchEvent("pointerdown", { button: 0, pointerId: 1, clientX: 100, clientY: 150 });
+    emitWin("pointermove", { pointerId: 1, clientX: 70, clientY: 120 });
+    emitWin("pointermove", { pointerId: 1, clientX: 99, clientY: 149 });
+    emitWin("pointerup", { button: 0, pointerId: 1, clientX: 99, clientY: 149 });
+    assert.equal(drawer.isOpen, true);
+
+    // 2. Arrastre rápido sin pointermove intermedio (pointerup desplazado >= 4px) NO cierra
+    drawerEl.dispatchEvent("pointerdown", { button: 0, pointerId: 2, clientX: 100, clientY: 150 });
+    emitWin("pointerup", { button: 0, pointerId: 2, clientX: 112, clientY: 150 });
+    assert.equal(drawer.isOpen, true);
+
+    // 3. Arrastrar barra de scroll horizontal (parte inferior) NO cierra
+    drawerEl.dispatchEvent("pointerdown", {
+      target: viewportEl,
+      button: 0,
+      pointerId: 3,
+      clientX: 150,
+      clientY: 64 + 408,
+    });
+    emitWin("pointerup", { button: 0, pointerId: 3, clientX: 150, clientY: 64 + 408 });
+    assert.equal(drawer.isOpen, true);
+
+    // 4. Si el viewport scrolleó mientras el botón estaba presionado, NO cierra
+    drawerEl.dispatchEvent("pointerdown", { button: 0, pointerId: 4, clientX: 100, clientY: 150 });
+    viewportEl.scrollTop = 90;
+    emitWin("pointerup", { button: 0, pointerId: 4, clientX: 100, clientY: 150 });
+    assert.equal(drawer.isOpen, true);
+
+    // 5. Click limpio sin movimiento SÍ oculta el manual
+    drawerEl.dispatchEvent("pointerdown", { button: 0, pointerId: 5, clientX: 100, clientY: 150 });
+    emitWin("pointerup", { button: 0, pointerId: 5, clientX: 100, clientY: 150 });
+    assert.equal(drawer.isOpen, false);
   } finally {
     globalThis.window = prevWin;
   }

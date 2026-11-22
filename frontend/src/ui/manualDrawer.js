@@ -63,48 +63,113 @@ export class ManualDrawer {
       this._updateVisiblePageIndicator();
     });
 
-    // Click en cualquier parte del visor oculta el manual; arrastrar cuando hay zoom desplaza la hoja
+    // Click en cualquier parte del visor oculta el manual; arrastrar desplaza la hoja sin cerrarlo
+    this.drawerEl?.addEventListener("dragstart", (ev) => ev.preventDefault());
+
     this.drawerEl?.addEventListener("pointerdown", (ev) => {
       if (ev.button !== 0) return;
+      if (ev.target?.closest?.("button, a, input, select, textarea")) return;
       // Ignoramos clicks en la barra de scroll vertical/horizontal nativa
       if (this.viewportEl && ev.target === this.viewportEl) {
         const rect = this.viewportEl.getBoundingClientRect();
-        if (ev.clientX > rect.left + this.viewportEl.clientWidth) return;
+        if (
+          ev.clientX >= rect.left + this.viewportEl.clientWidth - 2 ||
+          ev.clientY >= rect.top + this.viewportEl.clientHeight - 2
+        ) {
+          return;
+        }
       }
       this._pointerDown = {
+        pointerId: ev.pointerId,
         x: ev.clientX,
         y: ev.clientY,
         scrollLeft: this.viewportEl?.scrollLeft || 0,
         scrollTop: this.viewportEl?.scrollTop || 0,
         moved: false,
+        captured: false,
       };
     });
 
     window.addEventListener("pointermove", (ev) => {
-      if (!this._pointerDown) return;
-      const dx = ev.clientX - this._pointerDown.x;
-      const dy = ev.clientY - this._pointerDown.y;
-      if (Math.hypot(dx, dy) >= 5) {
-        this._pointerDown.moved = true;
-        if (this.zoom > 1.01 && this.viewportEl) {
-          this.viewportEl.classList.add("is-panning");
-          this.viewportEl.scrollLeft = this._pointerDown.scrollLeft - dx;
-          this.viewportEl.scrollTop = this._pointerDown.scrollTop - dy;
+      const down = this._pointerDown;
+      if (!down) return;
+      if (
+        down.pointerId !== undefined &&
+        ev.pointerId !== undefined &&
+        ev.pointerId !== down.pointerId
+      ) {
+        return;
+      }
+      const dx = ev.clientX - down.x;
+      const dy = ev.clientY - down.y;
+      if (down.moved || Math.hypot(dx, dy) >= 4) {
+        down.moved = true;
+        if (!down.captured && down.pointerId !== undefined) {
+          down.captured = true;
+          try {
+            this.drawerEl?.setPointerCapture?.(down.pointerId);
+          } catch {
+            // Ignora punteros sintéticos sin captura disponible
+          }
+        }
+        const vp = this.viewportEl;
+        const canPan =
+          vp &&
+          (this.zoom > 1.01 ||
+            vp.scrollHeight > vp.clientHeight + 1 ||
+            vp.scrollWidth > vp.clientWidth + 1);
+        if (canPan) {
+          vp.classList.add("is-panning");
+          vp.scrollLeft = down.scrollLeft - dx;
+          vp.scrollTop = down.scrollTop - dy;
         }
       }
     });
 
     const finishPointer = (ev) => {
-      if (!this._pointerDown) return;
-      const wasClick = !this._pointerDown.moved && ev.type === "pointerup";
+      const down = this._pointerDown;
+      if (!down) return;
+      if (
+        down.pointerId !== undefined &&
+        ev.pointerId !== undefined &&
+        ev.pointerId !== down.pointerId
+      ) {
+        return;
+      }
       this._pointerDown = null;
       this.viewportEl?.classList.remove("is-panning");
+      if (down.captured && down.pointerId !== undefined) {
+        try {
+          if (this.drawerEl?.hasPointerCapture?.(down.pointerId)) {
+            this.drawerEl.releasePointerCapture(down.pointerId);
+          }
+        } catch {
+          // Ignora si el navegador ya liberó la captura
+        }
+      }
+
+      const dx = typeof ev.clientX === "number" ? ev.clientX - down.x : 0;
+      const dy = typeof ev.clientY === "number" ? ev.clientY - down.y : 0;
+      const movedOnRelease = Math.hypot(dx, dy) >= 4;
+      const scrolled =
+        Math.abs((this.viewportEl?.scrollLeft || 0) - down.scrollLeft) >= 1 ||
+        Math.abs((this.viewportEl?.scrollTop || 0) - down.scrollTop) >= 1;
+      const wasClick =
+        ev.type === "pointerup" &&
+        (ev.button === undefined || ev.button === 0) &&
+        !down.moved &&
+        !movedOnRelease &&
+        !scrolled;
       if (wasClick && this.isOpen) {
         this.setOpen(false);
       }
     };
     window.addEventListener("pointerup", finishPointer);
     window.addEventListener("pointercancel", finishPointer);
+    window.addEventListener("blur", () => {
+      this._pointerDown = null;
+      this.viewportEl?.classList.remove("is-panning");
+    });
   }
 
   setHudVisible(visible) {

@@ -17,6 +17,8 @@ COLOUR_RE = re.compile(
 )
 ALPHA_RE = re.compile(r"\bALPHA\s+(\d+)")
 FINISH_KEYWORDS = ("CHROME", "PEARLESCENT", "RUBBER", "MATTE_METALLIC", "METAL")
+REBRICKABLE_KEYWORD_RE = re.compile(r"\bRebrickable\s+([A-Za-z0-9._-]+)", re.IGNORECASE)
+PATTERN_SUFFIX_RE = re.compile(r"(?:p[0-9a-z]|d[0-9a-z])", re.IGNORECASE)
 
 
 def parse_ldconfig(ldconfig_path: Path) -> list[dict]:
@@ -94,26 +96,74 @@ def _find_ldraw_root(ldraw_dir: Path) -> Path:
     return ldraw_dir
 
 
-def index_ldraw_parts(ldraw_dir: Path) -> list[tuple[str, str, str | None]]:
-    """Indexa archivos `.dat` principales de `parts/` (excluyendo sub-partes `s/`)."""
+def _alias_candidate_rank(ldraw_id: str, title: str | None, is_alias_org: bool) -> tuple[int, int, int, int, str]:
+    """Prioriza moldes base limpios sobre auxiliares (`~`), alias oficiales o variantes impresas."""
+    t = (title or "").strip()
+    is_aux = 1 if (t.startswith("~") or t.startswith("_") or t.startswith("=")) else 0
+    is_pattern = 1 if PATTERN_SUFFIX_RE.search(ldraw_id) else 0
+    return (is_aux, 1 if is_alias_org else 0, is_pattern, len(ldraw_id), ldraw_id)
+
+
+def index_ldraw_parts_and_aliases(
+    ldraw_dir: Path,
+) -> tuple[list[tuple[str, str, str | None]], list[tuple[str, str]]]:
+    """
+    Indexa `.dat` principales de `parts/` y extrae mapeos `Rebrickable <id>` desde `0 !KEYWORDS`.
+    Ante colisiones, conserva determinísticamente el molde base más limpio.
+    """
     root = _find_ldraw_root(ldraw_dir)
     parts_dir = root / "parts"
     if not parts_dir.is_dir():
-        return []
+        return [], []
 
     rows: list[tuple[str, str, str | None]] = []
+    best_aliases: dict[str, tuple[tuple[int, int, int, int, str], str]] = {}
+
     for dat_path in parts_dir.glob("*.dat"):
         ldraw_id = dat_path.stem.lower()
         rel_path = f"parts/{dat_path.name}"
         title: str | None = None
+        is_alias_org = False
+        rb_keywords: list[str] = []
+
         try:
             with dat_path.open("r", encoding="utf-8", errors="replace") as fh:
-                first_line = fh.readline().strip()
-                if first_line.startswith("0 "):
-                    title = first_line[2:].strip()
+                for line_idx in range(30):
+                    raw = fh.readline()
+                    if not raw:
+                        break
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    if not line.startswith("0"):
+                        break
+                    if line_idx == 0 and line.startswith("0 "):
+                        title = line[2:].strip()
+                    elif line.startswith("0 !LDRAW_ORG") and "Alias" in line:
+                        is_alias_org = True
+                    elif line.startswith("0 !KEYWORDS"):
+                        rb_keywords.extend(REBRICKABLE_KEYWORD_RE.findall(line))
         except OSError:
             title = None
+
         rows.append((ldraw_id, rel_path, title))
+        if rb_keywords:
+            rank = _alias_candidate_rank(ldraw_id, title, is_alias_org)
+            for raw_rb in rb_keywords:
+                rb_key = raw_rb.strip().lower()
+                if not rb_key:
+                    continue
+                prev = best_aliases.get(rb_key)
+                if prev is None or rank < prev[0]:
+                    best_aliases[rb_key] = (rank, ldraw_id)
+
+    alias_rows = [(rb_key, pair[1]) for rb_key, pair in best_aliases.items()]
+    return rows, alias_rows
+
+
+def index_ldraw_parts(ldraw_dir: Path) -> list[tuple[str, str, str | None]]:
+    """Indexa archivos `.dat` principales de `parts/` (excluyendo sub-partes `s/`)."""
+    rows, _ = index_ldraw_parts_and_aliases(ldraw_dir)
     return rows
 
 
@@ -229,11 +279,15 @@ def build_catalog_database(
                 sets_rows,
             )
 
-        # 7. Piezas LDraw locales
-        ldraw_parts_rows = index_ldraw_parts(ldraw_dir)
+        # 7. Piezas LDraw locales y alias `!KEYWORDS Rebrickable`
+        ldraw_parts_rows, alias_rows = index_ldraw_parts_and_aliases(ldraw_dir)
         conn.executemany(
             "INSERT OR REPLACE INTO ldraw_parts (ldraw_id, rel_path, title) VALUES (?, ?, ?)",
             ldraw_parts_rows,
+        )
+        conn.executemany(
+            "INSERT OR REPLACE INTO ldraw_keyword_aliases (rb_part_num, ldraw_id) VALUES (?, ?)",
+            alias_rows,
         )
 
         counts = {
@@ -244,6 +298,7 @@ def build_catalog_database(
             "part_relationships": len(rel_rows),
             "sets": len(sets_rows),
             "ldraw_parts": len(ldraw_parts_rows),
+            "ldraw_keyword_aliases": len(alias_rows),
         }
 
         meta = [

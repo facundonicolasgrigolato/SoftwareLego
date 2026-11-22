@@ -67,6 +67,11 @@ CREATE TABLE IF NOT EXISTS ldraw_parts (
     rel_path TEXT NOT NULL,
     title TEXT
 );
+
+CREATE TABLE IF NOT EXISTS ldraw_keyword_aliases (
+    rb_part_num TEXT PRIMARY KEY,
+    ldraw_id TEXT NOT NULL
+);
 """
 
 
@@ -81,6 +86,7 @@ def reset_database(conn: sqlite3.Connection) -> None:
         "part_relationships",
         "sets",
         "ldraw_parts",
+        "ldraw_keyword_aliases",
     )
     for table in tables:
         conn.execute(f"DROP TABLE IF EXISTS {table}")

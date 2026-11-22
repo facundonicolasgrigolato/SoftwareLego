@@ -306,6 +306,12 @@ class OnlineHybridResolver(BasePartResolver):
             pass
 
     def _try_unofficial_ldraw(self, part_num: str | None, design_id: str | None) -> tuple[str, str] | None:
+        hit, _ = self._try_unofficial_ldraw_with_status(part_num, design_id)
+        return hit
+
+    def _try_unofficial_ldraw_with_status(
+        self, part_num: str | None, design_id: str | None
+    ) -> tuple[tuple[str, str] | None, bool]:
         candidates: list[str] = []
         if part_num:
             candidates.extend(self._lookup_external_ldraw_ids(part_num))
@@ -331,25 +337,34 @@ class OnlineHybridResolver(BasePartResolver):
 
         misses = set(self._cache.get("unofficial_misses") or [])
         visited: set[str] = set()
+        had_transient_failure = False
 
         for cid in ordered_cids:
             rel = f"parts/{cid}.dat"
             if self._local_rel_exists(rel):
-                return cid, rel
-            if cid in misses or not self.allow_network:
+                return (cid, rel), False
+            if cid in misses:
+                continue
+            if not self.allow_network:
+                had_transient_failure = True
                 continue
             ok_dl, is_404 = self._download_unofficial_recursive(rel, visited)
             if ok_dl:
                 first_line = (self.ldraw_root / rel).read_text(encoding="utf-8", errors="ignore").splitlines()[0]
                 title = first_line[2:].strip() if first_line.startswith("0 ") else cid
                 self._register_sqlite_ldraw(cid, rel, title)
-                return cid, rel
+                return (cid, rel), False
             if is_404:
                 misses.add(cid)
                 self._cache["unofficial_misses"] = sorted(misses)
                 self._dirty = True
+            else:
+                had_transient_failure = True
 
-        return None
+        all_confirmed_404 = bool(ordered_cids) and not had_transient_failure and all(
+            cid in misses for cid in ordered_cids
+        )
+        return None, all_confirmed_404
 
     def _try_minifig_proxy(self, part_name: str | None) -> tuple[str, str, str] | None:
         if not part_name:
@@ -388,7 +403,7 @@ class OnlineHybridResolver(BasePartResolver):
         if base is None:
             return None
 
-        hit = self._try_unofficial_ldraw(base.part_num, base.design_id)
+        hit, all_confirmed_404 = self._try_unofficial_ldraw_with_status(base.part_num, base.design_id)
         if hit is not None:
             cid, rel = hit
             return replace(
@@ -397,6 +412,7 @@ class OnlineHybridResolver(BasePartResolver):
                 ldraw_part_id=cid,
                 ldraw_file=rel,
                 resolution_note=f"Resuelto vía LDraw Unofficial / API híbrida ('{cid}.dat') y cacheado localmente.",
+                unresolved_definitive=False,
             )
 
         proxy = self._try_minifig_proxy(base.part_name)
@@ -408,6 +424,9 @@ class OnlineHybridResolver(BasePartResolver):
                 ldraw_part_id=pid,
                 ldraw_file=rel,
                 resolution_note=note,
+                unresolved_definitive=False,
             )
 
+        if all_confirmed_404:
+            return replace(base, unresolved_definitive=True)
         return base

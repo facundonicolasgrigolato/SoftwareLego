@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as THREE from "three";
+import { BuildController } from "../src/builder/buildController.js";
 import {
   computeSnappedPlacementY,
   computeStudCoordParityOffset,
@@ -119,4 +120,211 @@ test("computeSupportedSurfaceY evita piezas flotando por tocar solo una esquina"
   assert.equal(computeSupportedSurfaceY(60, 80, 20, 40, placed, 82, 4), 0);
   // Pieza apoyada claramente encima del bloque alto (solapa 20x20 LDU) -> queda en y=80
   assert.equal(computeSupportedSurfaceY(20, 40, 20, 40, placed, 82, 4), 80);
+});
+
+test("BuildController.nudgeVertical mueve únicamente en eje Y mundial aunque haya stud o pared lateral", () => {
+  const fakeSceneManager = {
+    camera: { position: new THREE.Vector3(100, 120, 220) },
+    onFrame() {},
+    addPlacedMesh() {},
+    removePlacedMesh() {},
+    setSelectionBoxes() {},
+    refreshSelectionBox() {},
+  };
+  const bc = new BuildController(fakeSceneManager, {});
+
+  // Pieza colocada con stud lateral apuntando hacia +X
+  const baseMesh = new THREE.Group();
+  baseMesh.position.set(100, 24, 100);
+  baseMesh.userData = {
+    topStuds: [{ pos: new THREE.Vector3(10, -12, 0), up: new THREE.Vector3(1, 0, 0) }],
+  };
+  const baseBox = new THREE.Box3(new THREE.Vector3(90, 0, 90), new THREE.Vector3(110, 24, 110));
+  bc.placedPieces.push({
+    instanceId: "placed_1",
+    elementId: "base",
+    mesh: baseMesh,
+    localBox: new THREE.Box3(new THREE.Vector3(-10, -24, -10), new THREE.Vector3(10, 0, 10)),
+    worldBox: baseBox,
+  });
+
+  // Pieza en mano 1x1x1 plate con receptores estándar
+  const localBox = new THREE.Box3(new THREE.Vector3(-10, -8, -10), new THREE.Vector3(10, 0, 10));
+  const carryMesh = new THREE.Group();
+  carryMesh.userData = {
+    part: { dimensions: "1 x 1" },
+    collisionBoxes: [localBox],
+    bottomReceptors: [new THREE.Vector3(0, 0, 0)],
+  };
+  const ghost = new THREE.Group();
+
+  bc.carry = {
+    source: "pile",
+    elementId: "plate1x1",
+    mesh: carryMesh,
+    ghost,
+    localBox,
+    quaternion: new THREE.Quaternion(),
+    ghostBox: localBox.clone(),
+    surfaceNormal: new THREE.Vector3(1, 0, 0),
+    activeMechKind: null,
+    spinAngle: 0,
+    manualTiltApplied: false,
+    manualOffsetX: 0,
+    manualOffsetY: 0,
+    manualOffsetZ: 0,
+    parityOffsetX: 0,
+    parityOffsetZ: 0,
+    isColliding: false,
+    lastValid: null,
+  };
+  bc._lastHit = {
+    kind: "placed",
+    object: baseMesh,
+    point: new THREE.Vector3(110, 12, 100),
+    normal: new THREE.Vector3(1, 0, 0),
+  };
+
+  bc._updateCarryTransform();
+  const initialPos = ghost.position.clone();
+
+  bc.nudgeVertical(1, false); // 1 placa = +8 LDU en Y
+  assert.ok(Math.abs(ghost.position.x - initialPos.x) < 1e-6, "ArrowUp no debe mover X");
+  assert.ok(Math.abs(ghost.position.z - initialPos.z) < 1e-6, "ArrowUp no debe mover Z");
+  assert.ok(Math.abs(ghost.position.y - (initialPos.y + 8)) < 1e-6, "ArrowUp debe subir +8 en Y");
+
+  bc.nudgeVertical(-1, true); // media placa = -4 LDU en Y
+  assert.ok(Math.abs(ghost.position.x - initialPos.x) < 1e-6, "ArrowDown fino no debe mover X");
+  assert.ok(Math.abs(ghost.position.z - initialPos.z) < 1e-6, "ArrowDown fino no debe mover Z");
+  assert.ok(Math.abs(ghost.position.y - (initialPos.y + 4)) < 1e-6, "ArrowDown fino debe bajar -4 en Y");
+});
+
+test("Arrastrar click derecho rota según perspectiva (der=T, izq=R, arriba=G, abajo=F)", () => {
+  let activeRight = new THREE.Vector3(1, 0, 0);
+  let activeForward = new THREE.Vector3(0, 0, -1);
+  const fakeSceneManager = {
+    camera: { position: new THREE.Vector3(0, 120, 220) },
+    controls: { enablePan: true, enableRotate: true },
+    getHorizontalCameraAxes() {
+      return { right: activeRight.clone(), forward: activeForward.clone() };
+    },
+    onFrame() {},
+    addPlacedMesh() {},
+    removePlacedMesh() {},
+    setSelectionBoxes() {},
+    refreshSelectionBox() {},
+  };
+  const bc = new BuildController(fakeSceneManager, {});
+  const calls = [];
+  bc.carry = { ghost: new THREE.Group() };
+  bc.rotateActive = (axis, dir) =>
+    calls.push([axis?.isVector3 ? axis.toArray() : axis, dir]);
+
+  // Vista frontal: right = +X
+  assert.equal(bc.handleRightPointerDown(100, 100), true);
+  bc._handleRightDragMove(200, 100); // derecha -> T (+1 en Y)
+  bc._handleRightDragMove(100, 100); // izquierda -> R (-1 en Y)
+  bc._handleRightDragMove(100, 0);   // arriba -> G (-1 sobre right)
+  bc._handleRightDragMove(100, 100); // abajo -> F (+1 sobre right)
+  bc.handleRightPointerUp();
+
+  // Cámara rotada 90° a la derecha: right = (0, 0, -1)
+  activeRight = new THREE.Vector3(0, 0, -1);
+  activeForward = new THREE.Vector3(-1, 0, 0);
+  assert.equal(bc.handleRightPointerDown(100, 100), true);
+  bc._handleRightDragMove(100, 0);   // arriba -> G (-1 sobre nuevo right)
+  bc.handleRightPointerUp();
+
+  assert.deepEqual(calls, [
+    ["y", 1],
+    ["y", -1],
+    [[1, 0, 0], -1],
+    [[1, 0, 0], 1],
+    [[0, 0, -1], -1],
+  ]);
+});
+
+test("Rotar grupo arriba/abajo repetidamente en eje Z no genera deriva ni desfasaje de worldBox", () => {
+  const fakeSceneManager = {
+    camera: { position: new THREE.Vector3(0, 120, 220) },
+    controls: { enablePan: true, enableRotate: true },
+    onFrame() {},
+    addPlacedMesh() {},
+    removePlacedMesh() {},
+    syncPlacedTransform() {},
+    setSelectionBoxes() {},
+    refreshSelectionBox() {},
+  };
+  const bc = new BuildController(fakeSceneManager, {});
+
+  const makePiece = (id, x, y, z, w, h, d) => {
+    const mesh = new THREE.Group();
+    mesh.position.set(x, y, z);
+    const localBox = new THREE.Box3(
+      new THREE.Vector3(-w / 2, -h, -d / 2),
+      new THREE.Vector3(w / 2, 0, d / 2)
+    );
+    mesh.userData = { collisionBoxes: [localBox] };
+    const piece = {
+      instanceId: id,
+      elementId: id,
+      mesh,
+      localBox,
+      worldBox: null,
+    };
+    bc._refreshPlacedWorldBox(piece);
+    bc.placedPieces.push(piece);
+    return piece;
+  };
+
+  // Grupo asimétrico tipo frente de auto: base 6x2x1 brick + pieza superior desplazada a un lado
+  const p1 = makePiece("base", 0, 24, 0, 120, 24, 40);
+  const p2 = makePiece("top", -40, 32, 0, 40, 8, 20);
+  const init1 = p1.mesh.position.clone();
+  const init2 = p2.mesh.position.clone();
+  const box1Ref = p1.worldBox;
+
+  bc.selected = { kind: "group", items: [p1, p2] };
+
+  for (let i = 0; i < 6; i += 1) {
+    bc.rotateActive("z", -1);
+    assert.equal(p1.worldBox, box1Ref, "worldBox debe actualizarse in-place para Box3Helper");
+    bc.rotateActive("z", 1);
+  }
+
+  assert.ok(p1.mesh.position.distanceTo(init1) < 1e-4, "Base del grupo no debe derivar tras abajo/arriba");
+  assert.ok(p2.mesh.position.distanceTo(init2) < 1e-4, "Pieza superior del grupo no debe derivar tras abajo/arriba");
+});
+
+test("Modo fantasmal congela la pieza mientras se orbita/mueve la cámara manteniendo click", () => {
+  let raycastCalls = 0;
+  const fakeSceneManager = {
+    camera: { position: new THREE.Vector3(0, 120, 220) },
+    controls: { enablePan: true, enableRotate: true },
+    isCameraInteracting: false,
+    onFrame() {},
+    raycastWorkspace() {
+      raycastCalls += 1;
+      return null;
+    },
+  };
+  const bc = new BuildController(fakeSceneManager, {});
+  bc.carry = { ghost: new THREE.Group(), mesh: new THREE.Group() };
+
+  // Hover normal (sin botón apretado): sigue al mouse
+  bc.handlePointerMove(100, 100, 0);
+  assert.equal(raycastCalls, 1);
+
+  // Orbitando con click izquierdo sostenido o OrbitControls activo: congela el fantasma
+  bc.handlePointerMove(140, 120, 1);
+  fakeSceneManager.isCameraInteracting = true;
+  bc.handlePointerMove(180, 140, 0);
+  bc.handlePointerMove(200, 150, 4);
+  assert.equal(raycastCalls, 1, "No debe mover el fantasma mientras se arrastra la cámara");
+
+  // Arrastrando directamente una pieza ya levantada (_draggedCarryFromPress = true): sí acompaña
+  fakeSceneManager.isCameraInteracting = false;
+  bc._draggedCarryFromPress = true;
+  bc.handlePointerMove(220, 160, 1);
+  assert.equal(raycastCalls, 2);
 });

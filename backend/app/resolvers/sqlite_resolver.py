@@ -12,7 +12,7 @@ from app.resolvers.base import BasePartResolver
 
 PRINT_SUFFIX_RE = re.compile(r"^(.+?)(?:pr\d+|pat\d+|c\d+)$", re.IGNORECASE)
 MOLD_REVISION_RE = re.compile(r"^(\d{3,6})[a-z]$", re.IGNORECASE)
-RELATION_PRIORITY = ("P", "M", "A", "R")
+RELATION_PRIORITY = ("P", "M", "A")
 
 
 class SQLiteCatalogResolver(BasePartResolver):
@@ -28,6 +28,11 @@ class SQLiteCatalogResolver(BasePartResolver):
         self.db_path = db_path
         self._conn = sqlite3.connect(db_path)
         self._conn.row_factory = sqlite3.Row
+        self._has_keyword_aliases = bool(
+            self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ldraw_keyword_aliases'"
+            ).fetchone()
+        )
 
     def close(self) -> None:
         self._conn.close()
@@ -58,6 +63,17 @@ class SQLiteCatalogResolver(BasePartResolver):
             (candidate_id.strip().lower(),),
         ).fetchone()
 
+    def _find_ldraw_by_keyword_alias(self, candidate_id: str | None) -> sqlite3.Row | None:
+        if not candidate_id or not self._has_keyword_aliases:
+            return None
+        row = self._conn.execute(
+            "SELECT ldraw_id FROM ldraw_keyword_aliases WHERE rb_part_num = ?",
+            (candidate_id.strip().lower(),),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._find_ldraw_part(str(row["ldraw_id"]))
+
     def _resolve_via_relationships(self, part_num: str, max_depth: int = 3) -> tuple[sqlite3.Row, str] | None:
         """Recorre `part_relationships` (Print/Mold/Alternate) hasta encontrar un `.dat` válido."""
         visited: set[str] = {part_num}
@@ -68,9 +84,10 @@ class SQLiteCatalogResolver(BasePartResolver):
             if depth >= max_depth:
                 continue
 
+            placeholders = ",".join("?" for _ in RELATION_PRIORITY)
             rows = self._conn.execute(
-                "SELECT rel_type, parent_part_num FROM part_relationships WHERE child_part_num = ?",
-                (current,),
+                f"SELECT rel_type, parent_part_num FROM part_relationships WHERE child_part_num = ? AND rel_type IN ({placeholders})",
+                (current, *RELATION_PRIORITY),
             ).fetchall()
             rows_sorted = sorted(
                 rows,
@@ -148,6 +165,15 @@ class SQLiteCatalogResolver(BasePartResolver):
                         torso_row,
                         f"Resuelto como torso minifigura estándar '{torso_id}' (variante '{part_num}').",
                     )
+
+        for candidate in (part_num, design_id):
+            by_kw = self._find_ldraw_by_keyword_alias(candidate)
+            if by_kw is not None:
+                return (
+                    "fallback_mold",
+                    by_kw,
+                    f"Resuelto por alias LDraw !KEYWORDS Rebrickable ('{part_num}' -> '{by_kw['ldraw_id']}').",
+                )
 
         return (
             "unresolved",

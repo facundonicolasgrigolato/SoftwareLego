@@ -571,7 +571,7 @@ window.addEventListener("pointermove", (ev) => {
     updateMarqueeVisual();
     return;
   }
-  buildController.handlePointerMove(ev.clientX, ev.clientY);
+  buildController.handlePointerMove(ev.clientX, ev.clientY, ev.buttons);
 
   if (roomManager.isOpen() && !editorAppEl.classList.contains("hidden")) {
     const now = performance.now();
@@ -874,35 +874,43 @@ window.addEventListener("keydown", (ev) => {
     case "t":
       buildController.rotateActive("y", 1);
       break;
-    case "f":
-      buildController.rotateActive("x", 1);
+    case "f": {
+      const { right } = sceneManager.getHorizontalCameraAxes();
+      buildController.rotateActive(right, 1);
       break;
-    case "g":
-      buildController.rotateActive("x", -1);
+    }
+    case "g": {
+      const { right } = sceneManager.getHorizontalCameraAxes();
+      buildController.rotateActive(right, -1);
       break;
-    case "v":
-      buildController.rotateActive("z", 1);
+    }
+    case "v": {
+      const { forward } = sceneManager.getHorizontalCameraAxes();
+      buildController.rotateActive(forward.clone().negate(), 1);
       break;
-    case "b":
-      buildController.rotateActive("z", -1);
+    }
+    case "b": {
+      const { forward } = sceneManager.getHorizontalCameraAxes();
+      buildController.rotateActive(forward.clone().negate(), -1);
       break;
+    }
     case "arrowleft": {
       ev.preventDefault();
       const { right } = sceneManager.getHorizontalCameraAxes();
-      buildController.nudgeHorizontal(-right.x, -right.z);
+      buildController.nudgeHorizontal(-right.x, -right.z, ev.altKey);
       break;
     }
     case "arrowright": {
       ev.preventDefault();
       const { right } = sceneManager.getHorizontalCameraAxes();
-      buildController.nudgeHorizontal(right.x, right.z);
+      buildController.nudgeHorizontal(right.x, right.z, ev.altKey);
       break;
     }
     case "arrowup": {
       ev.preventDefault();
       if (ev.shiftKey) {
         const { forward } = sceneManager.getHorizontalCameraAxes();
-        buildController.nudgeHorizontal(forward.x, forward.z);
+        buildController.nudgeHorizontal(forward.x, forward.z, ev.altKey);
       } else {
         buildController.nudgeVertical(1, ev.altKey);
       }
@@ -912,7 +920,7 @@ window.addEventListener("keydown", (ev) => {
       ev.preventDefault();
       if (ev.shiftKey) {
         const { forward } = sceneManager.getHorizontalCameraAxes();
-        buildController.nudgeHorizontal(-forward.x, -forward.z);
+        buildController.nudgeHorizontal(-forward.x, -forward.z, ev.altKey);
       } else {
         buildController.nudgeVertical(-1, ev.altKey);
       }
@@ -971,6 +979,12 @@ window.addEventListener("keyup", (ev) => {
 });
 window.addEventListener("blur", () => {
   sceneManager.clearMoveKeys();
+  sceneManager.isCameraInteracting = false;
+  leftDownPos = null;
+  if (rightDownActive) {
+    rightDownActive = false;
+    buildController.handleRightPointerUp();
+  }
   if (marqueeState) {
     clearMarquee();
     sceneManager.controls.enabled = true;

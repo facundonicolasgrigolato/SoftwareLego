@@ -39,6 +39,24 @@ class TestResolvers(unittest.TestCase):
         )
         (ldraw_dir / "parts" / "3024.dat").write_text("0 Plate  1 x  1\n", encoding="utf-8")
         (ldraw_dir / "parts" / "87079.dat").write_text("0 Tile  2 x  4\n", encoding="utf-8")
+        (ldraw_dir / "parts" / "11209.dat").write_text("0 Tyre 21 x 9.9\n", encoding="utf-8")
+        # Alias por !KEYWORDS (ej. 14225.dat apunta a Rebrickable 14226c31) y colisión controlada
+        (ldraw_dir / "parts" / "14225.dat").write_text(
+            "0 String Braided 31L with End Studs\n"
+            "0 !KEYWORDS Line, Rebrickable 14226c31, rigging\n",
+            encoding="utf-8",
+        )
+        (ldraw_dir / "parts" / "14225p01.dat").write_text(
+            "0 String Printed Pattern\n"
+            "0 !KEYWORDS Rebrickable 14226c31\n",
+            encoding="utf-8",
+        )
+        # Un alias nunca debe pisar una pieza exacta existente (3024.dat)
+        (ldraw_dir / "parts" / "3024alt.dat").write_text(
+            "0 Plate Alt\n"
+            "0 !KEYWORDS Rebrickable 3024\n",
+            encoding="utf-8",
+        )
 
         _write_gz(
             rb_dir / "colors.csv.gz",
@@ -52,6 +70,9 @@ class TestResolvers(unittest.TestCase):
             "3024,Plate 1 x 1,14,Plastic\n"
             "87079pr9974,Tile 2 x 4 Printed,19,Plastic\n"
             "87079,Tile 2 x 4,19,Plastic\n"
+            "5807,Wheel 14mm D. x 9.9mm with Centre Groove,29,Plastic\n"
+            "11209,Tyre 21 x 9.9,29,Rubber\n"
+            "14226c31,String with End Studs 31L Overall,19,Plastic\n"
             "99999,Missing Mold,19,Plastic\n",
         )
         _write_gz(
@@ -59,12 +80,15 @@ class TestResolvers(unittest.TestCase):
             "element_id,part_num,color_id,design_id\n"
             "302401,3024,15,3024\n"
             "6500001,87079pr9974,4,\n"
+            "6594293,5807,15,5807\n"
+            "6510782,14226c31,4,\n"
             "6500002,99999,15,\n",
         )
         _write_gz(
             rb_dir / "part_relationships.csv.gz",
             "rel_type,child_part_num,parent_part_num\n"
-            "P,87079pr9974,87079\n",
+            "P,87079pr9974,87079\n"
+            "R,5807,11209\n",
         )
         _write_gz(
             rb_dir / "sets.csv.gz",
@@ -103,6 +127,8 @@ class TestResolvers(unittest.TestCase):
                         ExtractedPartItem("302401", 2, [10]),
                         ExtractedPartItem("6500001", 1, [10]),
                         ExtractedPartItem("6500002", 3, [10]),
+                        ExtractedPartItem("6594293", 4, [10]),
+                        ExtractedPartItem("6510782", 1, [10]),
                         ExtractedPartItem("7777777", 4, [11]),
                         ExtractedPartItem("8888888", 1, [11]),
                     ]
@@ -116,6 +142,15 @@ class TestResolvers(unittest.TestCase):
             self.assertEqual(by_id["6500001"].status, "fallback_mold")
             self.assertEqual(by_id["6500001"].ldraw_file, "parts/87079.dat")
             self.assertEqual(by_id["6500001"].color_rgb, "#C91A09")
+
+            # Alias LDraw !KEYWORDS Rebrickable rescata 14226c31 -> 14225 (molde base limpio)
+            self.assertEqual(by_id["6510782"].status, "fallback_mold")
+            self.assertEqual(by_id["6510782"].ldraw_part_id, "14225")
+            self.assertEqual(by_id["6510782"].ldraw_file, "parts/14225.dat")
+
+            # Relación R (ej. llanta 5807 <-> goma 11209) NO debe usarse como molde sustituto
+            self.assertEqual(by_id["6594293"].status, "unresolved")
+            self.assertIsNone(by_id["6594293"].ldraw_part_id)
 
             self.assertEqual(by_id["6500002"].status, "unresolved")
             self.assertEqual(by_id["7777777"].status, "override")
@@ -223,11 +258,15 @@ class TestResolvers(unittest.TestCase):
                 online_res = OnlineHybridResolver(paths=paths, sqlite_conn=sqlite_res._conn, allow_network=True)
                 # Simula timeout/429 transitorio (is_404 = False)
                 online_res._http_get_result = lambda url, headers=None: (None, False)  # type: ignore[method-assign]
-                self.assertIsNone(online_res._try_unofficial_ldraw("88888", ExtractedPartItem("8888801", 1, [1])))
+                hit_t, def_t = online_res._try_unofficial_ldraw_with_status("88888", None)
+                self.assertIsNone(hit_t)
+                self.assertFalse(def_t)
                 self.assertNotIn("88888", online_res._cache["unofficial_misses"])
-                # Un 404 definitivo sí se registra en unofficial_misses
+                # Un 404 definitivo sí se registra en unofficial_misses y se marca definitivo
                 online_res._http_get_result = lambda url, headers=None: (None, True)  # type: ignore[method-assign]
-                self.assertIsNone(online_res._try_unofficial_ldraw("88888", ExtractedPartItem("8888801", 1, [1])))
+                hit_d, def_d = online_res._try_unofficial_ldraw_with_status("88888", None)
+                self.assertIsNone(hit_d)
+                self.assertTrue(def_d)
                 self.assertIn("88888", online_res._cache["unofficial_misses"])
 
     def test_invalid_html_or_corrupt_dat_is_rejected(self) -> None:

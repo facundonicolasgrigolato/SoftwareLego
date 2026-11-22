@@ -114,3 +114,74 @@ test("BatchedPieceLayer agrupa proxies LDraw, soporta raycast, visibilidad, resi
     layer.dispose();
   });
 });
+
+function countDisagreeingWinding(geo) {
+  const pos = geo.attributes.position;
+  const norm = geo.attributes.normal;
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const c = new THREE.Vector3();
+  const e1 = new THREE.Vector3();
+  const e2 = new THREE.Vector3();
+  const fn = new THREE.Vector3();
+  const vn = new THREE.Vector3();
+  let disagree = 0;
+  for (let i = 0; i < pos.count; i += 3) {
+    a.fromBufferAttribute(pos, i);
+    b.fromBufferAttribute(pos, i + 1);
+    c.fromBufferAttribute(pos, i + 2);
+    e1.subVectors(b, a);
+    e2.subVectors(c, a);
+    fn.crossVectors(e1, e2);
+    vn.fromBufferAttribute(norm, i);
+    if (fn.dot(vn) < 0) disagree += 1;
+  }
+  return disagree;
+}
+
+test("buildBatchedGeometries corrige winding de sub-mallas espejadas (det < 0 y pieza 7796)", async (t) => {
+  const wrapper = new THREE.Group();
+  const mat = new THREE.MeshStandardMaterial({ color: 0x999999 });
+  const mirrored = new THREE.Mesh(new THREE.BoxGeometry(10, 10, 10), mat);
+  mirrored.scale.set(-1, 1, 1);
+  wrapper.add(mirrored);
+
+  const { batchedMeshGeo } = LDrawService.buildBatchedGeometries(wrapper, false);
+  assert.ok(batchedMeshGeo);
+  assert.equal(
+    countDisagreeingWinding(batchedMeshGeo),
+    0,
+    "Sub-malla espejada debe mantener triángulos CCW alineados a sus normales"
+  );
+  batchedMeshGeo.dispose();
+  mirrored.geometry.dispose();
+  mat.dispose();
+
+  if (!fs.existsSync(path.join(LDRAW_ROOT, "parts", "7796.dat"))) {
+    t.skip("Biblioteca local LDraw sin 7796.dat");
+    return;
+  }
+
+  await withLocalLDraw(async () => {
+    const svc = new LDrawService();
+    svc.loader.setPartsLibraryPath("http://localhost/ldraw/");
+    svc._materialsReady = svc.loader.preloadMaterials("http://localhost/ldraw/LDConfig.ldr");
+
+    const p7796Raw = await svc.createPartInstance({ ldraw_part_id: "7796", ldraw_color_code: 72 });
+    let rawDisagree = 0;
+    p7796Raw.group.traverse((child) => {
+      if (child.isMesh) rawDisagree += countDisagreeingWinding(child.geometry);
+    });
+
+    const p7796Batched = await svc.createPartInstance(
+      { ldraw_part_id: "7796", ldraw_color_code: 72 },
+      { lightweight: true, proxyOnly: true }
+    );
+    assert.ok(p7796Batched.group.userData.batchedMeshGeo);
+    assert.equal(
+      countDisagreeingWinding(p7796Batched.group.userData.batchedMeshGeo),
+      rawDisagree,
+      "Pieza 7796 en batch debe conservar exactamente el winding de todas sus subpartes espejadas"
+    );
+  });
+});

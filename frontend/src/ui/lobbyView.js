@@ -71,6 +71,8 @@ export class LobbyView {
     this.modalCoverEl = document.getElementById("slots-modal-cover");
     this.modalTitleEl = document.getElementById("slots-modal-title");
     this.modalMetaEl = document.getElementById("slots-modal-meta");
+    this.modalNoticeEl = document.getElementById("slots-modal-notice");
+    this.rescanSetBtnEl = document.getElementById("btn-rescan-set");
     this.closeModalBtnEl = document.getElementById("btn-close-slots");
     this.slotsListEl = document.getElementById("slots-list");
 
@@ -79,6 +81,7 @@ export class LobbyView {
     this.activeSlots = [];
     this.editingSlotNumber = null;
     this.busyUpload = false;
+    this.busyRescan = false;
     this.busyJoin = false;
 
     this._bindEvents();
@@ -110,6 +113,7 @@ export class LobbyView {
     });
 
     this.scanBtnEl.addEventListener("click", () => this.scanSets());
+    this.rescanSetBtnEl?.addEventListener("click", () => this.rescanActiveSet());
     this.closeModalBtnEl.addEventListener("click", () => this.closeModal());
     this.modalEl.addEventListener("click", (ev) => {
       if (ev.target === this.modalEl) this.closeModal();
@@ -383,12 +387,98 @@ export class LobbyView {
     }
   }
 
+  _renderModalNotice(setInfo, customMessage = null, customTone = "") {
+    if (!this.modalNoticeEl) return;
+    if (customMessage) {
+      this.modalNoticeEl.textContent = customMessage;
+      this.modalNoticeEl.className = `modal-notice${customTone ? ` is-${customTone}` : ""}`;
+      return;
+    }
+    const summary = setInfo?.unresolved_summary;
+    if (summary && summary.definitive_pieces > 0 && summary.transient_pieces === 0 && summary.reason) {
+      const n = summary.definitive_pieces;
+      const msg =
+        n === 1
+          ? `1 pieza no pudo aparecer porque ${summary.reason}. Volver a escanear no podrá recuperarla hasta que ese molde exista en LDraw.`
+          : `${n} piezas no pudieron aparecer porque ${summary.reason}. Volver a escanear no podrá recuperarlas hasta que esos moldes existan en LDraw.`;
+      this.modalNoticeEl.textContent = msg;
+      this.modalNoticeEl.className = "modal-notice is-warning";
+      return;
+    }
+    this.modalNoticeEl.textContent = "";
+    this.modalNoticeEl.className = "modal-notice hidden";
+  }
+
+  async rescanActiveSet() {
+    if (this.busyRescan || !this.activeModalSet) return;
+    const targetSet = this.activeModalSet;
+    this.busyRescan = true;
+    if (this.rescanSetBtnEl) {
+      this.rescanSetBtnEl.disabled = true;
+      this.rescanSetBtnEl.textContent = "Re-escaneando...";
+    }
+    this._renderModalNotice(targetSet, "Re-escaneando el PDF de este set...", "info");
+
+    try {
+      const resp = await fetch("/api/rescan-set", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          set_number: targetSet.set_number,
+          source_pdf: targetSet.source_pdf || null,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.ok) {
+        this._renderModalNotice(targetSet, data.error || "No se pudo re-escanear este set.", "error");
+        return;
+      }
+
+      if (Array.isArray(data.sets)) {
+        this.sets = data.sets;
+      }
+      const updated =
+        data.set ||
+        this.sets.find((s) => s.set_number === targetSet.set_number) ||
+        targetSet;
+      this.activeModalSet = updated;
+      this.modalTitleEl.textContent = `${updated.set_number} — ${updated.set_name}`;
+      this.modalMetaEl.textContent = `${updated.resolved_pieces} piezas 3D disponibles`;
+      this.renderSets();
+      this.renderSlots();
+
+      const summary = updated.unresolved_summary;
+      if (summary && summary.definitive_pieces > 0 && summary.transient_pieces === 0 && summary.reason) {
+        this._renderModalNotice(updated);
+      } else {
+        this._renderModalNotice(
+          updated,
+          `Re-escaneo listo: ${updated.resolved_pieces} / ${updated.total_pieces} piezas 3D disponibles.`,
+          "success"
+        );
+      }
+    } catch (err) {
+      this._renderModalNotice(targetSet, `Error al re-escanear: ${err.message}`, "error");
+    } finally {
+      this.busyRescan = false;
+      if (this.rescanSetBtnEl) {
+        this.rescanSetBtnEl.disabled = false;
+        this.rescanSetBtnEl.textContent = "↻ Re-escanear";
+      }
+    }
+  }
+
   async openSetModal(setInfo) {
     this.activeModalSet = setInfo;
     this.editingSlotNumber = null;
 
     this.modalTitleEl.textContent = `${setInfo.set_number} — ${setInfo.set_name}`;
     this.modalMetaEl.textContent = `${setInfo.resolved_pieces} piezas 3D disponibles`;
+    this._renderModalNotice(null);
+    if (this.rescanSetBtnEl) {
+      this.rescanSetBtnEl.disabled = false;
+      this.rescanSetBtnEl.textContent = "↻ Re-escanear";
+    }
     if (setInfo.cover_url) {
       this.modalCoverEl.src = setInfo.cover_url;
       this.modalCoverEl.classList.remove("hidden");
@@ -410,6 +500,7 @@ export class LobbyView {
 
   closeModal() {
     this.modalEl.classList.add("hidden");
+    this._renderModalNotice(null);
     this.activeModalSet = null;
     this.editingSlotNumber = null;
     if (this.joinModalEl && !this.joinModalEl.classList.contains("hidden")) {

@@ -249,21 +249,21 @@ function pageRotate() {
         ${bigArrow()}
         ${vis(before, "Antes")}
         ${bigArrow()}
-        ${vis(rotationWithArc([["y", 90]], "y"), "Gira sobre sí misma (eje <b class='hg-axis-y'>Y</b>)")}
+        ${vis(rotationWithArc([["y", 90]], "y"), `Gira izquierda/derecha (${kbd("R")} / ${kbd("T")})`)}
       </div>
       <div class="hg-flow hg-flow-tight">
         ${vis(mouseIcon({ button: "right", motion: "vertical" }), "Arrastrar <b>arriba / abajo</b>", "hg-vis-sm")}
         ${bigArrow()}
         ${vis(rotationScene([], "x"), "Antes")}
         ${bigArrow()}
-        ${vis(rotationWithArc([["x", 90]], "x"), "Se inclina y queda parada (eje <b class='hg-axis-x'>X</b>)")}
+        ${vis(rotationWithArc([["x", -90]], "x"), `Inclina arriba/abajo según tu vista (${kbd("G")} / ${kbd("F")})`)}
       </div>
     </div>
-    <h4 class="hg-subtitle">Con el teclado</h4>
+    <h4 class="hg-subtitle">Con el teclado (siempre sigue tu vista horizontal)</h4>
     <div class="hg-grid hg-grid-3">
-      ${card(`${kbd("R")} ${kbd("T")}`, "<p>Gira sobre el eje vertical <b class='hg-axis-y'>Y</b> (una tecla para cada lado).</p>", rotationWithArc([["y", 90]], "y"))}
-      ${card(`${kbd("F")} ${kbd("G")}`, "<p>Inclina sobre el eje <b class='hg-axis-x'>X</b> de la mesa.</p>", rotationWithArc([["x", 90]], "x"))}
-      ${card(`${kbd("V")} ${kbd("B")}`, "<p>Inclina sobre el eje <b class='hg-axis-z'>Z</b> de la mesa.</p>", rotationWithArc([["z", -90]], "z"))}
+      ${card(`${kbd("R")} ${kbd("T")}`, "<p>Gira hacia la izquierda (<b class='hg-axis-y'>R</b>) o derecha (<b class='hg-axis-y'>T</b>).</p>", rotationWithArc([["y", 90]], "y"))}
+      ${card(`${kbd("G")} ${kbd("F")}`, "<p>Inclina hacia arriba/atrás (<b>G</b>) o abajo/adelante (<b>F</b>) según dónde mirás.</p>", rotationWithArc([["x", -90]], "x"))}
+      ${card(`${kbd("V")} ${kbd("B")}`, "<p>Inclina de costado respecto a tu cámara.</p>", rotationWithArc([["z", -90]], "z"))}
     </div>`;
 }
 
@@ -282,10 +282,10 @@ function pageNudge() {
   return `
     <p class="hg-lead">Para ubicar la pieza con precisión, sin depender del mouse, usá las <b>flechas del teclado</b> mientras la tenés en la mano.</p>
     <div class="hg-grid hg-grid-2">
-      ${card("Moverla por la mesa", `<p>${kbd("←")} ${kbd("→")} la corren medio stud hacia los costados.<br>${kbd("Shift")}${plus}${kbd("↑")} ${kbd("↓")} la llevan hacia adelante o atrás.</p>`, nudgeTopDiagram())}
-      ${card("Subirla o bajarla", `<p>${kbd("↑")} ${kbd("↓")} suben o bajan la altura de a <b>1 placa</b>.<br>${kbd("Alt")}${plus}${kbd("↑")} ${kbd("↓")} de a <b>media placa</b>.</p>`, height)}
+      ${card("Moverla por la mesa", `<p>${kbd("←")} ${kbd("→")} la corren medio stud hacia los costados.<br>${kbd("Shift")}${plus}${kbd("↑")} ${kbd("↓")} la llevan hacia adelante o atrás según dónde mirás.</p>`, nudgeTopDiagram())}
+      ${card("Subirla o bajarla", `<p>${kbd("↑")} ${kbd("↓")} suben o bajan la altura de a <b>1 placa</b> (siempre en vertical).<br>${kbd("Alt")}${plus}${kbd("↑")} ${kbd("↓")} de a <b>media placa</b>.</p>`, height)}
     </div>
-    ${tip("Las direcciones siguen a la cámara: <b>→</b> siempre mueve la pieza hacia la derecha de tu pantalla, mires desde donde mires.")}`;
+    ${tip("<b>←</b> <b>→</b> y <b>Shift</b>+<b>↑</b> <b>↓</b> siguen tu perspectiva en la mesa, mientras que <b>↑</b> <b>↓</b> siempre suben y bajan en vertical.")}`;
 }
 
 function pageTools() {

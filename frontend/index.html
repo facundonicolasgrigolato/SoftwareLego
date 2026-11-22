@@ -82,9 +82,13 @@
               <p id="slots-modal-meta" class="modal-meta"></p>
             </div>
           </div>
-          <button id="btn-close-slots" class="btn-circle" title="Cerrar">✕</button>
+          <div class="modal-header-actions">
+            <button id="btn-rescan-set" type="button" class="btn btn-sm" title="Volver a analizar el PDF de este set para buscar piezas actualizadas">↻ Re-escanear</button>
+            <button id="btn-close-slots" class="btn-circle" title="Cerrar">✕</button>
+          </div>
         </header>
         <div class="modal-body">
+          <div id="slots-modal-notice" class="modal-notice hidden"></div>
           <div id="slots-list" class="slots-list"></div>
         </div>
       </div>

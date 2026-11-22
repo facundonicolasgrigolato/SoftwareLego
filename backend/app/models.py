@@ -48,6 +48,7 @@ class ResolvedPart:
     ldraw_color_code: int | None = None
     source_pages: list[int] = field(default_factory=list)
     bag_counts: dict[str, int] = field(default_factory=dict)
+    unresolved_definitive: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
