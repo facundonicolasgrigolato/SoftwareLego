@@ -922,6 +922,12 @@ function attachLocalMiddlewares(server) {
               } else {
                 const existingName = existingJson?.name || null;
                 const pieces = Array.isArray(body.pieces) ? body.pieces : [];
+                const manualPage = Number(body.manual_page ?? existingJson?.manual_page);
+                const rawBoxCount =
+                  body.custom_box_count !== undefined
+                    ? body.custom_box_count
+                    : existingJson?.custom_box_count;
+                const customBoxCount = rawBoxCount == null ? null : Number(rawBoxCount);
                 payload = {
                   version: "1.0.0",
                   slot: slotNum,
@@ -929,6 +935,10 @@ function attachLocalMiddlewares(server) {
                   name: String(body.name || existingName || `Slot ${slotNum}`).trim() || `Slot ${slotNum}`,
                   updated_at: nowIso,
                   placed_count: pieces.length,
+                  ...(Number.isFinite(manualPage) && manualPage >= 1 ? { manual_page: Math.round(manualPage) } : {}),
+                  ...(Number.isFinite(customBoxCount) && customBoxCount >= 1
+                    ? { custom_box_count: Math.max(1, Math.min(24, Math.round(customBoxCount))) }
+                    : {}),
                   pieces,
                   history: Array.isArray(body.history) ? body.history : [],
                 };

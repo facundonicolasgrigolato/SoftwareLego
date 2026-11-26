@@ -8,7 +8,7 @@ import { RemotePresenceRenderer } from "./net/remotePresence.js";
 import { RoomManager } from "./net/roomManager.js";
 import { HelpGuide } from "./ui/helpGuide.js";
 import { LobbyView } from "./ui/lobbyView.js";
-import { ManualDrawer } from "./ui/manualDrawer.js";
+import { ManualDrawer, buildManualHistoryKey } from "./ui/manualDrawer.js";
 import { RoomModal } from "./ui/roomModal.js";
 import { TrayPanel } from "./ui/trayPanel.js";
 
@@ -46,6 +46,7 @@ const btnShowHudEl = document.getElementById("btn-show-hud");
 const btnFocusMesaEl = document.getElementById("btn-focus-mesa");
 const btnStickerModeEl = document.getElementById("btn-sticker-mode");
 const btnMultiplayerEl = document.getElementById("btn-multiplayer");
+const btnTraySettingsEl = document.getElementById("btn-tray-settings");
 const lblImportBuildEl = document.getElementById("lbl-import-build");
 const roomStatusChipEl = document.getElementById("room-status-chip");
 const remoteCursorsLayerEl = document.getElementById("remote-cursors-layer");
@@ -53,6 +54,19 @@ const stickerPopoverEl = document.getElementById("sticker-popover");
 const btnCloseStickerEl = document.getElementById("btn-close-sticker");
 const btnStickerPasteEl = document.getElementById("btn-sticker-paste");
 const inputStickerFileEl = document.getElementById("input-sticker-file");
+const traySettingsPopoverEl = document.getElementById("tray-settings-popover");
+const btnCloseTraySettingsEl = document.getElementById("btn-close-tray-settings");
+const traySettingsSummaryEl = document.getElementById("tray-settings-summary");
+const inputTrayCountEl = document.getElementById("input-tray-count");
+const btnTrayIncEl = document.getElementById("btn-tray-inc");
+const btnTrayDecEl = document.getElementById("btn-tray-dec");
+const traySettingsEstimateEl = document.getElementById("tray-settings-estimate");
+const traySettingsWarningEl = document.getElementById("tray-settings-warning");
+const traySettingsWarningTextEl = document.getElementById("tray-settings-warning-text");
+const btnTrayWarningCancelEl = document.getElementById("btn-tray-warning-cancel");
+const btnTrayWarningConfirmEl = document.getElementById("btn-tray-warning-confirm");
+const btnTrayDefaultEl = document.getElementById("btn-tray-default");
+const btnTrayApplyEl = document.getElementById("btn-tray-apply");
 
 const manualDrawer = new ManualDrawer(
   {
@@ -64,6 +78,7 @@ const manualDrawer = new ManualDrawer(
     viewportEl: document.getElementById("manual-viewport"),
     pagesContainerEl: document.getElementById("manual-pages"),
     statusEl: document.getElementById("manual-status"),
+    resizeHandleEl: document.getElementById("manual-resize-handle"),
   },
   {
     onOpenChanged: (isOpen) => {
@@ -102,7 +117,7 @@ let autoSaveTimer = null;
 let autoSaveInFlight = false;
 let autoSaveQueued = false;
 let hudVisible = true;
-let trayVisible = true;
+let trayVisible = false;
 let stickerMode = false;
 let pendingStickerTarget = null; // { piece, placement }
 
@@ -189,6 +204,8 @@ async function persistCurrentSlot({ showToastOnSuccess = false } = {}) {
       name: currentSlotName || `Slot ${currentSlotNumber}`,
       pieces: serialized.pieces,
       history: buildController.history,
+      manualPage: manualDrawer.getSavedPage(),
+      customBoxCount: buildController.customBoxCount,
     });
     if (showToastOnSuccess) {
       showToast(`Guardado en Slot ${currentSlotNumber} (${serialized.pieces.length} piezas).`);
@@ -218,6 +235,9 @@ function updateLayoutVisibility() {
   bottomDockEl?.classList.toggle("hidden", !hudVisible);
   workspaceEl.classList.toggle("hud-hidden", !hudVisible);
   minimalControlsEl.classList.toggle("hidden", hudVisible);
+  if (!hudVisible) {
+    closeTraySettingsPopover();
+  }
 
   const showTray = hudVisible && trayVisible;
   trayPanelEl.classList.toggle("hidden", !showTray);
@@ -327,9 +347,14 @@ const roomManager = new RoomManager({
   },
   onGuestWorldSnapshot: (snapshot) => {
     if (buildController.manifest) {
-      buildController.loadFromNetworkSnapshot(buildController.manifest, snapshot, {
-        passivePhysics: true,
-      });
+      buildController
+        .loadFromNetworkSnapshot(buildController.manifest, snapshot, {
+          passivePhysics: true,
+        })
+        .then(() => {
+          trayPanel?.setManifest(buildController.getEffectiveManifest());
+          refreshTraySettingsUI();
+        });
     }
   },
   onGuestWorldEvent: (msg) => {
@@ -342,9 +367,14 @@ const roomManager = new RoomManager({
       }
     } else if (msg.type === "world:snapshot") {
       if (buildController.manifest) {
-        buildController.loadFromNetworkSnapshot(buildController.manifest, msg.snapshot, {
-          passivePhysics: true,
-        });
+        buildController
+          .loadFromNetworkSnapshot(buildController.manifest, msg.snapshot, {
+            passivePhysics: true,
+          })
+          .then(() => {
+            trayPanel?.setManifest(buildController.getEffectiveManifest());
+            refreshTraySettingsUI();
+          });
       }
     } else if (msg.type === "world:op") {
       buildController.handleHostNetworkOp(msg);
@@ -401,6 +431,7 @@ function applyRolePermissions() {
   const isGuest = roomManager.isGuest();
   btnStickerModeEl?.classList.toggle("hidden", isGuest);
   btnMultiplayerEl?.classList.toggle("hidden", isGuest);
+  btnTraySettingsEl?.classList.toggle("hidden", isGuest);
   btnUndoEl?.classList.toggle("hidden", isGuest);
   btnClearEl?.classList.toggle("hidden", isGuest);
   btnExportEl?.classList.toggle("hidden", isGuest);
@@ -408,6 +439,7 @@ function applyRolePermissions() {
   btnSaveSlotEl?.classList.toggle("hidden", isGuest);
   if (isGuest) {
     if (stickerMode) setStickerMode(false);
+    closeTraySettingsPopover();
     roomModal.hide();
   }
 }
@@ -521,11 +553,61 @@ function clearMarquee() {
   selectionMarqueeEl?.classList.add("hidden");
 }
 
+let lastPresenceSentAt = 0;
+let pendingCarryMove = null;
+let carryMoveRafId = 0;
+
+function syncMultiplayerCursorAndCarry(clientX, clientY) {
+  if (!roomManager.isOpen() || editorAppEl.classList.contains("hidden")) return;
+  const now = performance.now();
+  if (now - lastPresenceSentAt < 42) return;
+  lastPresenceSentAt = now;
+  const targetEl = document.elementFromPoint(clientX, clientY);
+  const overCanvas = targetEl === canvas;
+  if (!overCanvas) {
+    roomManager.sendPresence({ type: "cursor:update", visible: false });
+  } else {
+    const hit = sceneManager.raycastWorkspace(clientX, clientY, {
+      ignoreObject: buildController.carry?.ghost || null,
+    });
+    roomManager.sendPresence({
+      type: "cursor:update",
+      visible: Boolean(hit),
+      position: hit
+        ? {
+            x: Math.round(hit.point.x * 10) / 10,
+            y: Math.round(hit.point.y * 10) / 10,
+            z: Math.round(hit.point.z * 10) / 10,
+          }
+        : null,
+    });
+  }
+  if (buildController.carry) {
+    roomManager.sendPresence({
+      type: "carry:preview",
+      ...buildController.getCarryPreviewPayload(),
+    });
+  }
+}
+
+function flushPendingCarryMove() {
+  if (carryMoveRafId) {
+    cancelAnimationFrame(carryMoveRafId);
+    carryMoveRafId = 0;
+  }
+  const move = pendingCarryMove;
+  pendingCarryMove = null;
+  if (!move) return;
+  buildController.handlePointerMove(move.clientX, move.clientY, move.buttons);
+  syncMultiplayerCursorAndCarry(move.clientX, move.clientY);
+}
+
 canvas.addEventListener("contextmenu", (ev) => ev.preventDefault());
 
 canvas.addEventListener(
   "pointerdown",
   (ev) => {
+    flushPendingCarryMove();
     if (document.activeElement instanceof HTMLElement && document.activeElement !== canvas) {
       document.activeElement.blur();
     }
@@ -563,7 +645,6 @@ canvas.addEventListener(
   { capture: true }
 );
 
-let lastPresenceSentAt = 0;
 window.addEventListener("pointermove", (ev) => {
   if (marqueeState) {
     marqueeState.curX = ev.clientX;
@@ -571,43 +652,26 @@ window.addEventListener("pointermove", (ev) => {
     updateMarqueeVisual();
     return;
   }
-  buildController.handlePointerMove(ev.clientX, ev.clientY, ev.buttons);
-
-  if (roomManager.isOpen() && !editorAppEl.classList.contains("hidden")) {
-    const now = performance.now();
-    if (now - lastPresenceSentAt >= 42) {
-      lastPresenceSentAt = now;
-      const targetEl = document.elementFromPoint(ev.clientX, ev.clientY);
-      const overCanvas = targetEl === canvas;
-      if (!overCanvas) {
-        roomManager.sendPresence({ type: "cursor:update", visible: false });
-      } else {
-        const hit = sceneManager.raycastWorkspace(ev.clientX, ev.clientY, {
-          ignoreObject: buildController.carry?.ghost || null,
-        });
-        roomManager.sendPresence({
-          type: "cursor:update",
-          visible: Boolean(hit),
-          position: hit
-            ? {
-                x: Math.round(hit.point.x * 10) / 10,
-                y: Math.round(hit.point.y * 10) / 10,
-                z: Math.round(hit.point.z * 10) / 10,
-              }
-            : null,
-        });
-      }
-      if (buildController.carry) {
-        roomManager.sendPresence({
-          type: "carry:preview",
-          ...buildController.getCarryPreviewPayload(),
-        });
-      }
+  if (buildController.carry && !buildController._rightDrag) {
+    pendingCarryMove = { clientX: ev.clientX, clientY: ev.clientY, buttons: ev.buttons };
+    if (!carryMoveRafId) {
+      carryMoveRafId = requestAnimationFrame(() => {
+        carryMoveRafId = 0;
+        const move = pendingCarryMove;
+        pendingCarryMove = null;
+        if (!move) return;
+        buildController.handlePointerMove(move.clientX, move.clientY, move.buttons);
+        syncMultiplayerCursorAndCarry(move.clientX, move.clientY);
+      });
     }
+    return;
   }
+  buildController.handlePointerMove(ev.clientX, ev.clientY, ev.buttons);
+  syncMultiplayerCursorAndCarry(ev.clientX, ev.clientY);
 });
 
 window.addEventListener("pointerup", (ev) => {
+  flushPendingCarryMove();
   if (ev.button === 0 && marqueeState) {
     const m = marqueeState;
     clearMarquee();
@@ -671,8 +735,159 @@ btnUndoEl.addEventListener("click", () => buildController.undo());
 btnStickerModeEl?.addEventListener("click", () => setStickerMode(!stickerMode));
 btnMultiplayerEl?.addEventListener("click", () => {
   if (roomManager.isGuest()) return;
+  closeTraySettingsPopover();
   if (roomModal.isOpen()) roomModal.hide();
   else roomModal.show();
+});
+
+const TRAY_WARNING_AVG_LIMIT = 150;
+let pendingTrayConfirmCount = null;
+
+function isTraySettingsOpen() {
+  return Boolean(traySettingsPopoverEl && !traySettingsPopoverEl.classList.contains("hidden"));
+}
+
+function refreshTraySettingsUI() {
+  const isCustom = buildController.customBoxCount != null;
+  const open = isTraySettingsOpen();
+  btnTraySettingsEl?.classList.toggle("is-on", open || isCustom);
+  btnTraySettingsEl?.setAttribute("aria-pressed", String(open));
+  if (btnTrayDefaultEl) {
+    const defCount = buildController.getDefaultBoxCount();
+    btnTrayDefaultEl.textContent = `Por defecto (${defCount})`;
+  }
+}
+
+function updateTrayEstimateDisplay() {
+  if (!inputTrayCountEl || !traySettingsEstimateEl) return;
+  const raw = Math.round(Number(inputTrayCountEl.value));
+  const count = Number.isFinite(raw) ? Math.max(1, Math.min(24, raw)) : 1;
+  const looseCount = buildController.getLoosePieceCount();
+  const approx = count > 0 ? Math.ceil(looseCount / count) : 0;
+  traySettingsEstimateEl.textContent =
+    looseCount > 0
+      ? `Aprox. ${approx} pieza(s) por caja${approx > TRAY_WARNING_AVG_LIMIT ? " (muchas por caja)" : ""}`
+      : "No hay piezas sueltas en este momento.";
+}
+
+function hideTrayWarning() {
+  pendingTrayConfirmCount = null;
+  traySettingsWarningEl?.classList.add("hidden");
+}
+
+function closeTraySettingsPopover() {
+  hideTrayWarning();
+  traySettingsPopoverEl?.classList.add("hidden");
+  refreshTraySettingsUI();
+}
+
+function positionTraySettingsPopover() {
+  if (!traySettingsPopoverEl || !btnTraySettingsEl || !workspaceEl) return;
+  const wsRect = workspaceEl.getBoundingClientRect();
+  const btnRect = btnTraySettingsEl.getBoundingClientRect();
+  const popW = 304;
+  const popH = traySettingsPopoverEl.offsetHeight || 220;
+  const left = Math.max(
+    12,
+    Math.min(wsRect.width - popW - 12, btnRect.left - wsRect.left + btnRect.width / 2 - popW / 2)
+  );
+  const top = Math.max(12, btnRect.top - wsRect.top - popH - 12);
+  traySettingsPopoverEl.style.left = `${Math.round(left)}px`;
+  traySettingsPopoverEl.style.top = `${Math.round(top)}px`;
+}
+
+function openTraySettingsPopover() {
+  if (!traySettingsPopoverEl || roomManager.isGuest() || !buildController.manifest) return;
+  hideTrayWarning();
+  const looseCount = buildController.getLoosePieceCount();
+  const defCount = buildController.getDefaultBoxCount();
+  const curCount = buildController.getEffectiveBoxCount();
+  if (traySettingsSummaryEl) {
+    traySettingsSummaryEl.textContent = `Piezas sueltas: ${looseCount} · Por defecto: ${defCount} caja(s)`;
+  }
+  if (inputTrayCountEl) {
+    inputTrayCountEl.value = String(curCount);
+  }
+  updateTrayEstimateDisplay();
+  traySettingsPopoverEl.classList.remove("hidden");
+  positionTraySettingsPopover();
+  refreshTraySettingsUI();
+  inputTrayCountEl?.focus();
+  inputTrayCountEl?.select();
+}
+
+function commitTrayBoxCount(targetCount) {
+  if (!buildController.setCustomBoxCount(targetCount)) return;
+  trayPanel.setManifest(buildController.getEffectiveManifest());
+  closeTraySettingsPopover();
+  scheduleAutoSave();
+  if (targetCount == null) {
+    showToast(`Cajas restauradas por defecto (${buildController.getDefaultBoxCount()}).`);
+  } else {
+    showToast(`Piezas repartidas en ${targetCount} caja(s).`);
+  }
+}
+
+btnTraySettingsEl?.addEventListener("click", () => {
+  if (roomManager.isGuest()) return;
+  if (isTraySettingsOpen()) closeTraySettingsPopover();
+  else openTraySettingsPopover();
+});
+btnCloseTraySettingsEl?.addEventListener("click", closeTraySettingsPopover);
+inputTrayCountEl?.addEventListener("input", () => {
+  hideTrayWarning();
+  updateTrayEstimateDisplay();
+  positionTraySettingsPopover();
+});
+function stepTrayBoxCount(delta) {
+  if (!inputTrayCountEl) return;
+  const raw = Math.round(Number(inputTrayCountEl.value));
+  const cur = Number.isFinite(raw) ? raw : buildController.getEffectiveBoxCount();
+  const next = Math.max(1, Math.min(24, cur + delta));
+  inputTrayCountEl.value = String(next);
+  hideTrayWarning();
+  updateTrayEstimateDisplay();
+  positionTraySettingsPopover();
+}
+btnTrayIncEl?.addEventListener("click", () => stepTrayBoxCount(1));
+btnTrayDecEl?.addEventListener("click", () => stepTrayBoxCount(-1));
+inputTrayCountEl?.addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter") {
+    ev.preventDefault();
+    btnTrayApplyEl?.click();
+  }
+});
+btnTrayDefaultEl?.addEventListener("click", () => {
+  commitTrayBoxCount(null);
+});
+btnTrayApplyEl?.addEventListener("click", () => {
+  const raw = Math.round(Number(inputTrayCountEl?.value));
+  if (!Number.isFinite(raw) || raw < 1 || raw > 24) {
+    showToast("Ingresá un número de cajas entre 1 y 24.");
+    return;
+  }
+  const looseCount = buildController.getLoosePieceCount();
+  const approx = Math.ceil(looseCount / raw);
+  if (looseCount > 0 && approx > TRAY_WARNING_AVG_LIMIT) {
+    pendingTrayConfirmCount = raw;
+    if (traySettingsWarningTextEl) {
+      traySettingsWarningTextEl.textContent = `¿Estás seguro? Tomar esta decisión haría que las cajas tengan aproximadamente ${approx} piezas cada una.`;
+    }
+    traySettingsWarningEl?.classList.remove("hidden");
+    positionTraySettingsPopover();
+    return;
+  }
+  commitTrayBoxCount(raw);
+});
+btnTrayWarningCancelEl?.addEventListener("click", () => {
+  hideTrayWarning();
+  positionTraySettingsPopover();
+});
+btnTrayWarningConfirmEl?.addEventListener("click", () => {
+  const target = pendingTrayConfirmCount;
+  if (target != null) {
+    commitTrayBoxCount(target);
+  }
 });
 roomStatusChipEl?.addEventListener("click", () => {
   if (roomManager.isHost()) roomModal.show();
@@ -749,9 +964,11 @@ btnClearEl.addEventListener("click", async () => {
   if (!currentSetInfo) return;
   if (!buildController.placedPieces.length) return;
   if (confirm("¿Devolver todas las piezas armadas a la pila en este slot?")) {
+    manualDrawer.clearProgress(buildManualHistoryKey(currentSetNumber, currentSlotNumber));
     await loadManifestIntoSlot(currentSetInfo, currentSlotNumber, currentSlotName, {
       pieces: [],
       history: [],
+      custom_box_count: buildController.customBoxCount,
     });
     await persistCurrentSlot({ showToastOnSuccess: true });
     if (roomManager.isHost()) {
@@ -858,6 +1075,9 @@ window.addEventListener("keydown", (ev) => {
   }
 
   if (ev.ctrlKey || ev.metaKey) {
+    if (!ev.altKey && (ev.key.toLowerCase() === "a" || ev.code === "KeyA")) {
+      ev.preventDefault();
+    }
     return;
   }
 
@@ -960,7 +1180,9 @@ window.addEventListener("keydown", (ev) => {
       buildController.returnSelectedToPile();
       break;
     case "escape":
-      if (stickerMode || pendingStickerTarget) {
+      if (isTraySettingsOpen()) {
+        closeTraySettingsPopover();
+      } else if (stickerMode || pendingStickerTarget) {
         setStickerMode(false);
       } else if (marqueeState) {
         clearMarquee();
@@ -1007,13 +1229,22 @@ async function loadManifestIntoSlot(setInfo, slotNumber, slotName, saveData = nu
     currentSlotNumber = slotNumber;
     currentSlotName = slotName || `Slot ${slotNumber}`;
 
-    const saved = saveData ? { pieces: saveData.pieces || [] } : null;
+    const saved = saveData
+      ? {
+          pieces: saveData.pieces || [],
+          custom_box_count: saveData.custom_box_count ?? null,
+        }
+      : null;
     const savedHistory = Array.isArray(saveData?.history) ? saveData.history : [];
 
     await buildController.loadManifest(manifest, saved, savedHistory);
-    trayPanel.setManifest(manifest);
+    trayPanel.setManifest(buildController.getEffectiveManifest());
+    refreshTraySettingsUI();
     manualDrawer.setOpen(false);
-    manualDrawer.setSet(currentSetNumber, manifest.source_pdf || "");
+    manualDrawer.setSet(currentSetNumber, manifest.source_pdf || "", {
+      historyKey: buildManualHistoryKey(currentSetNumber, currentSlotNumber),
+      fallbackPage: Number(saveData?.manual_page) || 1,
+    });
     sceneManager.resetCamera();
     return true;
   } finally {
@@ -1030,6 +1261,7 @@ async function enterEditorWithSlot({ setInfo, slotNumber, slotName, saveData }) 
   lobbyView.hide();
   editorAppEl.classList.remove("hidden");
   hudVisible = true;
+  trayVisible = false;
   updateLayoutVisibility();
 
   try {
@@ -1075,15 +1307,19 @@ async function joinRoomFromLobby({ code, playerName, onProgress }) {
   lobbyView.hide();
   editorAppEl.classList.remove("hidden");
   hudVisible = true;
+  trayVisible = false;
   updateLayoutVisibility();
 
   await buildController.loadFromNetworkSnapshot(manifest, snapshot, { passivePhysics: true });
   if (!roomManager.isGuest()) {
     return;
   }
-  trayPanel.setManifest(manifest);
+  trayPanel.setManifest(buildController.getEffectiveManifest());
+  refreshTraySettingsUI();
   manualDrawer.setOpen(false);
-  manualDrawer.setSet(currentSetNumber, manifest.source_pdf || setMeta.pdf_filename || "");
+  manualDrawer.setSet(currentSetNumber, manifest.source_pdf || setMeta.pdf_filename || "", {
+    historyKey: buildManualHistoryKey(currentSetNumber, null),
+  });
   applyRolePermissions();
   renderRoomStatusChip({
     mode: roomManager.mode,
@@ -1116,6 +1352,7 @@ async function returnToLobby({ skipFlush = false } = {}) {
     sceneManager.controls.enabled = true;
   }
   setStickerMode(false);
+  closeTraySettingsPopover();
   roomModal.hide();
   buildController.cancelCarry();
   buildController.clearSelection();
@@ -1125,6 +1362,8 @@ async function returnToLobby({ skipFlush = false } = {}) {
   remotePresence.clearAll();
   sceneManager.clearMoveKeys();
   helpGuide.close();
+  manualDrawer.flushProgress();
+  manualDrawer.resetWidth();
   applyRolePermissions();
 
   currentSetInfo = null;

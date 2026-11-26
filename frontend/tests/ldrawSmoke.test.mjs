@@ -5,8 +5,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as THREE from "three";
 import { LDrawService } from "../src/core/ldrawService.js";
-import { checkPieceCollision } from "../src/builder/collision.js";
-import { computeTransformedWorldBox } from "../src/builder/collision.js";
+import { checkPieceCollision, computeTransformedWorldBox } from "../src/builder/collision.js";
+import { findBestMechanicalMatch } from "../src/builder/connectors.js";
+import { BuildController } from "../src/builder/buildController.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, "..", "..");
@@ -375,6 +376,520 @@ test("Colisión 2 fases (OBB + BVH) permite encajar piezas curvas reales (27925 
         ),
         true
       );
+
+      // Pelucas LDD (21269, 62810) conectan coaxialmente sobre cabezas minifig (3626c, 28621) sin falsa colisión BVH, pero bloquean si se desplazan de costado
+      const hairHeads = ["3626c", "28621"].filter((id) =>
+        fs.existsSync(path.join(LDRAW_ROOT, "parts", `${id}.dat`))
+      );
+      const hairWigs = ["21269", "62810"].filter((id) =>
+        fs.existsSync(path.join(LDRAW_ROOT, "parts", `${id}.dat`))
+      );
+      for (const hId of hairHeads) {
+        const head = await svc.createPartInstance({ ldraw_part_id: hId, ldraw_color_code: 14 });
+        assert.equal(head.group.userData.collisionMeshData.isMinifigHead, true);
+        head.group.position.set(0, 24, 0);
+        head.group.updateMatrixWorld(true);
+        const headWb = computeTransformedWorldBox(
+          head.group.userData.collisionBoxes,
+          head.group.position,
+          q0
+        );
+        const headPlaced = [
+          { mesh: head.group, localBox: head.localBox, worldBox: headWb },
+        ];
+
+        for (const wId of hairWigs) {
+          const wig = await svc.createPartInstance({ ldraw_part_id: wId, ldraw_color_code: 1 });
+          assert.ok(wig.group.userData.antiStuds?.length > 0, `${wId} debe conservar antiStuds`);
+          for (const deg of [0, 90, 180, 270]) {
+            const qWig = new THREE.Quaternion().setFromAxisAngle(
+              new THREE.Vector3(0, 1, 0),
+              (deg * Math.PI) / 180
+            );
+            assert.equal(
+              checkPieceCollision(
+                wig.group.userData.collisionBoxes,
+                new THREE.Vector3(0, 24, 0),
+                qWig,
+                headPlaced,
+                null,
+                0.052,
+                wig.group.userData.collisionMeshData
+              ),
+              false,
+              `${wId} en ${hId} rot=${deg}° debe conectar en (0, 24, 0)`
+            );
+          }
+          assert.equal(
+            checkPieceCollision(
+              wig.group.userData.collisionBoxes,
+              new THREE.Vector3(6, 24, 0),
+              q0,
+              headPlaced,
+              null,
+              0.052,
+              wig.group.userData.collisionMeshData
+            ),
+            true,
+            `${wId} descentrada sobre ${hId} debe seguir bloqueada`
+          );
+        }
+      }
+
+      // Minidoll Friends/Disney: torso (73141) <-> cabeza (92198) <-> pelo Ariel (15677)
+      if (
+        fs.existsSync(path.join(LDRAW_ROOT, "parts", "73141.dat")) &&
+        fs.existsSync(path.join(LDRAW_ROOT, "parts", "92198.dat")) &&
+        fs.existsSync(path.join(LDRAW_ROOT, "parts", "15677.dat"))
+      ) {
+        const mdTorso = await svc.createPartInstance({ ldraw_part_id: "73141", ldraw_color_code: 14 });
+        const mdHead = await svc.createPartInstance({ ldraw_part_id: "92198", ldraw_color_code: 14 });
+        const mdHair = await svc.createPartInstance({ ldraw_part_id: "15677", ldraw_color_code: 4 });
+        assert.equal(mdHead.group.userData.collisionMeshData.isMinifigHead, true);
+
+        const tPos = new THREE.Vector3(0, -mdTorso.group.userData.defaultSupportUndersideY, 0);
+        mdTorso.group.position.copy(tPos);
+        mdTorso.group.updateMatrixWorld(true);
+        const mdTorsoPlaced = [
+          {
+            mesh: mdTorso.group,
+            localBox: mdTorso.localBox,
+            worldBox: computeTransformedWorldBox(mdTorso.group.userData.collisionBoxes, tPos, q0),
+          },
+        ];
+
+        const neckMatch = findBestMechanicalMatch({
+          carriedMesh: mdHead.group,
+          carriedQuat: q0,
+          autoOrient: true,
+          manualTiltApplied: false,
+          spinAngle: 0,
+          hit: { kind: "placed", object: mdTorso.group, point: new THREE.Vector3(0, tPos.y + 26, -3.9) },
+          cardN: new THREE.Vector3(0, 1, 0),
+          placedPieces: mdTorsoPlaced,
+          ignoreMesh: null,
+        });
+        assert.equal(neckMatch?.kind, "minifig_neck");
+        assert.equal(
+          checkPieceCollision(
+            mdHead.group.userData.collisionBoxes,
+            neckMatch.position,
+            neckMatch.quaternion,
+            mdTorsoPlaced,
+            null,
+            0.052,
+            mdHead.group.userData.collisionMeshData
+          ),
+          false,
+          "Cabeza minidoll 92198 debe encastrar en cuello del torso 73141"
+        );
+
+        mdHead.group.position.copy(neckMatch.position);
+        mdHead.group.quaternion.copy(neckMatch.quaternion);
+        mdHead.group.updateMatrixWorld(true);
+        const mdAssembled = [
+          ...mdTorsoPlaced,
+          {
+            mesh: mdHead.group,
+            localBox: mdHead.localBox,
+            worldBox: computeTransformedWorldBox(
+              mdHead.group.userData.collisionBoxes,
+              mdHead.group.position,
+              mdHead.group.quaternion
+            ),
+          },
+        ];
+        const studWorld = mdHead.group.userData.topStuds[0].pos
+          .clone()
+          .applyQuaternion(mdHead.group.quaternion)
+          .add(mdHead.group.position);
+        assert.equal(
+          checkPieceCollision(
+            mdHair.group.userData.collisionBoxes,
+            studWorld,
+            q0,
+            mdAssembled,
+            null,
+            0.052,
+            mdHair.group.userData.collisionMeshData
+          ),
+          false,
+          "Pelo Ariel 15677 debe encastrar sobre cabeza 92198 montada en torso 73141"
+        );
+        assert.equal(
+          checkPieceCollision(
+            mdHair.group.userData.collisionBoxes,
+            studWorld.clone().add(new THREE.Vector3(6, 0, 0)),
+            q0,
+            [mdAssembled[1]],
+            null,
+            0.052,
+            mdHair.group.userData.collisionMeshData
+          ),
+          true,
+          "Pelo Ariel 15677 descentrado debe seguir bloqueado"
+        );
+      }
+
+      if (fs.existsSync(path.join(LDRAW_ROOT, "parts", "37762.dat"))) {
+        const c1 = await svc.createPartInstance({ ldraw_part_id: "37762", ldraw_color_code: 14 });
+        const c2 = await svc.createPartInstance({ ldraw_part_id: "37762", ldraw_color_code: 14 });
+        c1.group.position.set(0, 0, 0);
+        c1.group.quaternion.copy(q0);
+        c1.group.updateMatrixWorld(true);
+        const c1Placed = [
+          {
+            mesh: c1.group,
+            localBox: c1.localBox,
+            worldBox: computeTransformedWorldBox(c1.group.userData.collisionBoxes, c1.group.position, q0),
+          },
+        ];
+        const stackMatch = findBestMechanicalMatch({
+          carriedMesh: c2.group,
+          carriedQuat: q0,
+          autoOrient: true,
+          manualTiltApplied: false,
+          spinAngle: 0,
+          hit: { kind: "placed", object: c1.group, point: new THREE.Vector3(0, 32, 0) },
+          cardN: new THREE.Vector3(0, 1, 0),
+          placedPieces: c1Placed,
+          ignoreMesh: null,
+        });
+        assert.equal(stackMatch?.kind, "bar");
+        assert.ok(
+          Math.abs(stackMatch.position.y - 32) < 0.05,
+          "Equipment Candlestick 37762 debe apilarse al ras en y=32 sin necesidad de flecha abajo"
+        );
+        assert.equal(
+          checkPieceCollision(
+            c2.group.userData.collisionBoxes,
+            stackMatch.position,
+            stackMatch.quaternion,
+            c1Placed,
+            null,
+            0.052,
+            c2.group.userData.collisionMeshData
+          ),
+          false,
+          "Candlestick apilado al ras no debe colisionar"
+        );
+        assert.equal(
+          checkPieceCollision(
+            c2.group.userData.collisionBoxes,
+            new THREE.Vector3(0, 25, 0),
+            q0,
+            c1Placed,
+            null,
+            0.052,
+            c2.group.userData.collisionMeshData
+          ),
+          true,
+          "Candlestick invadiendo el cuerpo inferior debe seguir bloqueado"
+        );
+
+        if (fs.existsSync(path.join(LDRAW_ROOT, "parts", "63965.dat"))) {
+          const bar6 = await svc.createPartInstance({ ldraw_part_id: "63965", ldraw_color_code: 297 });
+          const barMatch = findBestMechanicalMatch({
+            carriedMesh: bar6.group,
+            carriedQuat: q0,
+            autoOrient: true,
+            manualTiltApplied: false,
+            spinAngle: 0,
+            hit: { kind: "placed", object: c1.group, point: new THREE.Vector3(0, 32, 0) },
+            cardN: new THREE.Vector3(0, 1, 0),
+            placedPieces: c1Placed,
+            ignoreMesh: null,
+          });
+          assert.equal(barMatch?.kind, "bar");
+          assert.ok(
+            Math.abs(barMatch.position.y - 40) < 0.05,
+            "Bar 6L with Stop Ring 63965 debe insertar su punta inferior 10 LDU dentro de 37762 (y=40)"
+          );
+          assert.equal(
+            checkPieceCollision(
+              bar6.group.userData.collisionBoxes,
+              barMatch.position,
+              barMatch.quaternion,
+              c1Placed,
+              null,
+              0.052,
+              bar6.group.userData.collisionMeshData
+            ),
+            false,
+            "Bar 63965 insertado en 37762 no debe colisionar"
+          );
+          const qFlip = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI);
+          const flippedBarMatch = findBestMechanicalMatch({
+            carriedMesh: bar6.group,
+            carriedQuat: qFlip,
+            autoOrient: true,
+            manualTiltApplied: false,
+            spinAngle: 0,
+            hit: { kind: "placed", object: c1.group, point: new THREE.Vector3(0, 32, 0) },
+            cardN: new THREE.Vector3(0, 1, 0),
+            placedPieces: c1Placed,
+            ignoreMesh: null,
+          });
+          assert.equal(flippedBarMatch?.kind, "bar");
+          assert.ok(
+            Math.abs(flippedBarMatch.position.y - 124.5) < 0.05,
+            "Bar 63965 invertido debe insertar la punta larga (+102.5) en 37762 (y=124.5)"
+          );
+
+          if (fs.existsSync(path.join(LDRAW_ROOT, "parts", "71752.dat"))) {
+            const hay = await svc.createPartInstance({ ldraw_part_id: "71752", ldraw_color_code: 19 });
+            hay.group.position.set(0, 20, 0);
+            hay.group.quaternion.copy(q0);
+            hay.group.updateMatrixWorld(true);
+            const hayPlaced = [
+              {
+                mesh: hay.group,
+                localBox: hay.localBox,
+                worldBox: computeTransformedWorldBox(hay.group.userData.collisionBoxes, hay.group.position, q0),
+              },
+            ];
+            const hayMatch = findBestMechanicalMatch({
+              carriedMesh: bar6.group,
+              carriedQuat: q0,
+              autoOrient: true,
+              manualTiltApplied: false,
+              spinAngle: 0,
+              hit: { kind: "placed", object: hay.group, point: new THREE.Vector3(0, 20, 0) },
+              cardN: new THREE.Vector3(0, 1, 0),
+              placedPieces: hayPlaced,
+              ignoreMesh: null,
+            });
+            assert.equal(hayMatch?.kind, "bar_axle");
+            assert.ok(
+              hayMatch.position.y >= 18 && Math.abs(hayMatch.position.y - 20.15) < 0.2,
+              "Bar 63965 debe encastrar su punta inferior en el axle hole de 71752 (y≈20.15)"
+            );
+            assert.equal(
+              checkPieceCollision(
+                bar6.group.userData.collisionBoxes,
+                hayMatch.position,
+                hayMatch.quaternion,
+                hayPlaced,
+                null,
+                0.052,
+                bar6.group.userData.collisionMeshData
+              ),
+              false,
+              "Bar 63965 insertado en axle hole de 71752 no debe colisionar"
+            );
+          }
+        }
+      }
+      if (
+        fs.existsSync(path.join(LDRAW_ROOT, "parts", "41682.dat")) &&
+        fs.existsSync(path.join(LDRAW_ROOT, "parts", "3004.dat"))
+      ) {
+        const brk = await svc.createPartInstance({ ldraw_part_id: "41682", ldraw_color_code: 19 });
+        const brick = await svc.createPartInstance({ ldraw_part_id: "3004", ldraw_color_code: 14 });
+        const qRot = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2);
+        brick.group.position.set(0, 32, 0);
+        brick.group.quaternion.copy(q0);
+        brick.group.updateMatrixWorld(true);
+
+        const bc = new BuildController(
+          {
+            camera: { position: new THREE.Vector3(100, 120, 220) },
+            controls: { enablePan: true, enableRotate: true },
+            onFrame() {},
+          },
+          {}
+        );
+        bc.pilePhysics = { isPointInAnyBag: () => false };
+        bc.placedPieces = [
+          {
+            instanceId: "brick_3004",
+            elementId: "3004",
+            mesh: brick.group,
+            localBox: brick.localBox,
+            worldBox: computeTransformedWorldBox(brick.group.userData.collisionBoxes, brick.group.position, q0),
+          },
+        ];
+        bc._lastHit = {
+          kind: "placed",
+          object: brick.group,
+          point: new THREE.Vector3(0, 32, 0),
+          normal: new THREE.Vector3(0, 1, 0),
+        };
+        const rotBox = computeTransformedWorldBox(brk.group.userData.collisionBoxes, new THREE.Vector3(), qRot);
+        bc.carry = {
+          source: "pile",
+          elementId: "41682",
+          mesh: brk.group,
+          ghost: new THREE.Group(),
+          localBox: brk.localBox,
+          quaternion: qRot.clone(),
+          ghostBox: rotBox,
+          surfaceNormal: new THREE.Vector3(0, 1, 0),
+          spinAngle: 0,
+          manualTiltApplied: true,
+          parityOffsetX: 0,
+          parityOffsetZ: 0,
+          manualOffsetX: 0,
+          manualOffsetY: 0,
+          manualOffsetZ: 0,
+          isColliding: false,
+        };
+        bc._updateCarryTransform();
+        assert.equal(bc.carry.isColliding, false, "Bracket 41682 rotado debe encastrar sobre brick 3004");
+        assert.ok(
+          Math.abs(bc.carry.ghost.position.x) < 0.05 &&
+            Math.abs(bc.carry.ghost.position.y - 36) < 0.05 &&
+            Math.abs(bc.carry.ghost.position.z - 10) < 0.05,
+          "Bracket 41682 debe apoyar su ala 1x2 al ras sobre brick 3004 (y=36, z=10) dejando colgar el faldón"
+        );
+      }
+
+      if (
+        fs.existsSync(path.join(LDRAW_ROOT, "parts", "35480.dat")) &&
+        fs.existsSync(path.join(LDRAW_ROOT, "parts", "20482.dat"))
+      ) {
+        const p35480 = await svc.createPartInstance({ ldraw_part_id: "35480", ldraw_color_code: 10015 });
+        const t1 = await svc.createPartInstance({ ldraw_part_id: "20482", ldraw_color_code: 297 });
+        const t2 = await svc.createPartInstance({ ldraw_part_id: "20482", ldraw_color_code: 297 });
+        t1.group.position.set(-10, 8, 0);
+        t1.group.updateMatrixWorld(true);
+        t2.group.position.set(10, 8, 0);
+        t2.group.updateMatrixWorld(true);
+
+        const bc = new BuildController(
+          {
+            camera: { position: new THREE.Vector3(100, 120, 220) },
+            controls: { enablePan: true, enableRotate: true },
+            onFrame() {},
+          },
+          {}
+        );
+        bc.pilePhysics = { isPointInAnyBag: () => false };
+        bc.placedPieces = [
+          {
+            instanceId: "t1",
+            elementId: "20482",
+            mesh: t1.group,
+            localBox: t1.localBox,
+            worldBox: computeTransformedWorldBox(t1.group.userData.collisionBoxes, t1.group.position, q0),
+          },
+          {
+            instanceId: "t2",
+            elementId: "20482",
+            mesh: t2.group,
+            localBox: t2.localBox,
+            worldBox: computeTransformedWorldBox(t2.group.userData.collisionBoxes, t2.group.position, q0),
+          },
+        ];
+        bc._lastHit = {
+          kind: "placed",
+          object: t1.group,
+          point: new THREE.Vector3(-10, 12, 0),
+          normal: new THREE.Vector3(0, 1, 0),
+        };
+        bc.carry = {
+          source: "pile",
+          elementId: "35480",
+          mesh: p35480.group,
+          ghost: new THREE.Group(),
+          localBox: p35480.localBox,
+          quaternion: q0.clone(),
+          ghostBox: p35480.localBox.clone(),
+          surfaceNormal: new THREE.Vector3(0, 1, 0),
+          spinAngle: 0,
+          manualTiltApplied: false,
+          parityOffsetX: 0,
+          parityOffsetZ: 0,
+          manualOffsetX: 0,
+          manualOffsetY: 0,
+          manualOffsetZ: 0,
+          isColliding: false,
+        };
+        bc._updateCarryTransform();
+        assert.equal(bc.carry.isColliding, false, "Plate 35480 debe encastrar al ras sobre ambos 20482");
+        assert.ok(
+          Math.abs(bc.carry.ghost.position.x) < 0.05 &&
+            Math.abs(bc.carry.ghost.position.y - 16) < 0.05 &&
+            Math.abs(bc.carry.ghost.position.z) < 0.05,
+          "Plate 35480 debe quedar en (0, 16, 0) alineando sus 2 open studs sobre ambos 20482"
+        );
+      }
+
+      if (
+        fs.existsSync(path.join(LDRAW_ROOT, "parts", "30374.dat")) &&
+        fs.existsSync(path.join(LDRAW_ROOT, "parts", "15712.dat")) &&
+        fs.existsSync(path.join(LDRAW_ROOT, "parts", "3022.dat"))
+      ) {
+        const bar4 = await svc.createPartInstance({ ldraw_part_id: "30374", ldraw_color_code: 10015 });
+        const clip = await svc.createPartInstance({ ldraw_part_id: "15712", ldraw_color_code: 297 });
+        const plate = await svc.createPartInstance({ ldraw_part_id: "3022", ldraw_color_code: 19 });
+        const qClipFront = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2);
+        plate.group.position.set(0, 8, 10);
+        plate.group.updateMatrixWorld(true);
+        clip.group.position.set(0, 20, 10);
+        clip.group.quaternion.copy(qClipFront);
+        clip.group.updateMatrixWorld(true);
+
+        const bc = new BuildController(
+          {
+            camera: { position: new THREE.Vector3(100, 120, 220) },
+            controls: { enablePan: true, enableRotate: true },
+            onFrame() {},
+          },
+          {}
+        );
+        bc.pilePhysics = { isPointInAnyBag: () => false };
+        bc.placedPieces = [
+          {
+            instanceId: "plate_3022",
+            elementId: "3022",
+            mesh: plate.group,
+            localBox: plate.localBox,
+            worldBox: computeTransformedWorldBox(plate.group.userData.collisionBoxes, plate.group.position, q0),
+          },
+          {
+            instanceId: "clip_15712",
+            elementId: "15712",
+            mesh: clip.group,
+            localBox: clip.localBox,
+            worldBox: computeTransformedWorldBox(clip.group.userData.collisionBoxes, clip.group.position, qClipFront),
+          },
+        ];
+        bc._lastHit = {
+          kind: "placed",
+          object: clip.group,
+          point: new THREE.Vector3(0, 20, 16),
+          normal: new THREE.Vector3(0, 0, 1),
+        };
+        bc.carry = {
+          source: "pile",
+          elementId: "30374",
+          mesh: bar4.group,
+          ghost: new THREE.Group(),
+          localBox: bar4.localBox,
+          quaternion: q0.clone(),
+          ghostBox: bar4.localBox.clone(),
+          surfaceNormal: new THREE.Vector3(0, 1, 0),
+          spinAngle: 0,
+          manualTiltApplied: false,
+          parityOffsetX: 0,
+          parityOffsetZ: 0,
+          manualOffsetX: 0,
+          manualOffsetY: 0,
+          manualOffsetZ: 0,
+          isColliding: false,
+        };
+        bc._updateCarryTransform();
+        assert.equal(
+          bc.carry.isColliding,
+          false,
+          "Bar 4L 30374 debe deslizarse a lo largo de la barra para encastrar en clip 15712 sin chocar con el plate inferior"
+        );
+        assert.ok(
+          bc.carry.ghost.position.y >= 88 && bc.carry.ghost.position.y <= 96,
+          "Bar 4L debe quedar sujeto cerca de su extremo inferior por encima del plate"
+        );
+      }
     }
   );
 });

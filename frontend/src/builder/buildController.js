@@ -19,7 +19,7 @@ import {
   computeTransformedWorldBox,
   findCollidingPieces,
 } from "./collision.js";
-import { findBestMechanicalMatch } from "./connectors.js";
+import { findBestMechanicalMatch, transformConnector } from "./connectors.js";
 import {
   computeSnappedPlacementY,
   computeStudCoordParityOffset,
@@ -62,6 +62,9 @@ export class BuildController {
     this.sceneManager.onFrame((dt) => this._onFrame(dt));
 
     this.manifest = null;
+    this.effectiveManifest = null;
+    this.customBoxCount = null;
+    this._partOrderMap = new Map();
     this.tableLayout = computeTableLayout(null);
     this.partsByElementId = new Map();
     this.failedElementIds = new Set();
@@ -212,6 +215,7 @@ export class BuildController {
   async loadManifest(manifest, savedState = null, savedHistory = null) {
     this.clearWorkspace(false);
     this.manifest = manifest;
+    this.customBoxCount = this.normalizeCustomBoxCount(savedState?.custom_box_count);
     const resolvedParts = (manifest.parts || []).filter(
       (p) => p.status !== "unresolved" && p.ldraw_part_id
     );
@@ -222,18 +226,16 @@ export class BuildController {
       );
     }
 
-    this.tableLayout = computeTableLayout(manifest);
-    this.sceneManager.applyTableLayout(this.tableLayout);
-    this.pilePhysics.passiveMode = false;
-    this.pilePhysics.setBagZones(this.tableLayout.bagZones);
     this.partsByElementId.clear();
+    this._partOrderMap.clear();
     this.failedElementIds.clear();
     this.pendingPool = [];
     this.isLightweightSet = totalCount >= LIGHTWEIGHT_RENDER_THRESHOLD;
 
-    for (const part of resolvedParts) {
+    resolvedParts.forEach((part, idx) => {
       this.partsByElementId.set(part.element_id, part);
-    }
+      this._partOrderMap.set(part.element_id, idx);
+    });
 
     // 1. Restauramos piezas ya colocadas si existía progreso guardado
     let skippedRestored = 0;
@@ -266,7 +268,9 @@ export class BuildController {
         group.rotation.set(item.rotation.x, item.rotation.y, item.rotation.z);
         group.userData.instanceId = instanceId;
         group.userData.elementId = item.element_id;
-        group.userData.bagNumber = this._getDefaultBagForElement(item.element_id);
+        const origBag = this._getOrigBagForElement(item.element_id);
+        group.userData.origBagNumber = origBag;
+        group.userData.bagNumber = origBag;
 
         const restoredPiece = {
           instanceId,
@@ -352,7 +356,7 @@ export class BuildController {
       if (!bagEntries.length) {
         const remaining = Math.max(0, part.quantity - toSkip);
         for (let i = 0; i < remaining; i += 1) {
-          this.pendingPool.push({ elementId: part.element_id, bagNumber: 1 });
+          this.pendingPool.push({ elementId: part.element_id, bagNumber: 1, origBagNumber: 1 });
         }
       } else {
         for (const [bagNum, qty] of bagEntries) {
@@ -360,23 +364,202 @@ export class BuildController {
           toSkip -= skipHere;
           const remHere = qty - skipHere;
           for (let i = 0; i < remHere; i += 1) {
-            this.pendingPool.push({ elementId: part.element_id, bagNumber: bagNum });
+            this.pendingPool.push({
+              elementId: part.element_id,
+              bagNumber: bagNum,
+              origBagNumber: bagNum,
+            });
           }
         }
       }
     }
-    this.pendingPool.sort((a, b) => a.bagNumber - b.bagNumber);
+    this.pendingPool.sort((a, b) => a.origBagNumber - b.origBagNumber);
+
+    if (this.customBoxCount != null) {
+      this._assignBalancedBags(this.pendingPool, this.customBoxCount);
+      this.effectiveManifest = this._buildBalancedEffectiveManifest(
+        this.manifest,
+        this.customBoxCount,
+        this.pendingPool
+      );
+      for (const p of this.placedPieces) {
+        p.mesh.userData.bagNumber = this._getDefaultBagForElement(p.elementId);
+      }
+    } else {
+      this.effectiveManifest = this.manifest;
+    }
+
+    this.tableLayout = computeTableLayout(this.effectiveManifest);
+    this.sceneManager.applyTableLayout(this.tableLayout);
+    this.pilePhysics.passiveMode = false;
+    this.pilePhysics.setBagZones(this.tableLayout.bagZones);
 
     // 3. Soltamos todas las bolsas en sus respectivos cuadros de la mesa
     await this.dropNextBatch(this.pendingPool.length, skippedRestored);
     this._emitChange();
   }
 
-  _getDefaultBagForElement(elementId) {
+  normalizeCustomBoxCount(value) {
+    if (value == null || value === "") return null;
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < 1) return null;
+    return Math.max(1, Math.min(24, Math.round(n)));
+  }
+
+  getDefaultBoxCount() {
+    const bags = this.manifest?.bags;
+    return Math.max(1, Array.isArray(bags) && bags.length ? bags.length : 1);
+  }
+
+  getEffectiveBoxCount() {
+    return this.customBoxCount ?? this.getDefaultBoxCount();
+  }
+
+  getLoosePieceCount() {
+    return this.pilePhysics.items.length + this.pendingPool.length;
+  }
+
+  getEffectiveManifest() {
+    return this.effectiveManifest || this.manifest;
+  }
+
+  _getOrigBagForElement(elementId) {
     const part = this.partsByElementId.get(elementId);
     const keys = Object.keys(part?.bag_counts || {}).map(Number).filter((n) => n > 0);
     if (keys.length) return Math.min(...keys);
-    return this.tableLayout?.bagZones?.[0]?.bagNumber || 1;
+    return this.manifest?.bags?.[0]?.bag_number || 1;
+  }
+
+  _getDefaultBagForElement(elementId) {
+    if (this.customBoxCount != null && this.effectiveManifest) {
+      const effPart = (this.effectiveManifest.parts || []).find((p) => p.element_id === elementId);
+      const effKeys = Object.keys(effPart?.bag_counts || {}).map(Number).filter((n) => n > 0);
+      if (effKeys.length) return Math.min(...effKeys);
+      const orig = this._getOrigBagForElement(elementId);
+      return Math.max(1, Math.min(this.customBoxCount, orig));
+    }
+    return this._getOrigBagForElement(elementId);
+  }
+
+  _assignBalancedBags(entries, boxCount) {
+    const k = Math.max(1, Math.min(24, Math.round(boxCount)));
+    const ordered = [...entries].sort((a, b) => {
+      const ba = a.origBagNumber ?? a.bagNumber ?? 1;
+      const bb = b.origBagNumber ?? b.bagNumber ?? 1;
+      if (ba !== bb) return ba - bb;
+      const oa = this._partOrderMap.get(a.elementId) ?? Number.MAX_SAFE_INTEGER;
+      const ob = this._partOrderMap.get(b.elementId) ?? Number.MAX_SAFE_INTEGER;
+      if (oa !== ob) return oa - ob;
+      return String(a.elementId || "").localeCompare(String(b.elementId || ""));
+    });
+    const total = ordered.length;
+    const base = Math.floor(total / k);
+    const rem = total % k;
+    let cursor = 0;
+    for (let boxIdx = 0; boxIdx < k; boxIdx += 1) {
+      const quota = base + (boxIdx < rem ? 1 : 0);
+      const bagNum = boxIdx + 1;
+      for (let j = 0; j < quota && cursor < total; j += 1) {
+        ordered[cursor].bagNumber = bagNum;
+        cursor += 1;
+      }
+    }
+  }
+
+  _buildBalancedEffectiveManifest(baseManifest, boxCount, assignedItems) {
+    if (!baseManifest) return null;
+    if (boxCount == null) return baseManifest;
+    const k = Math.max(1, Math.min(24, Math.round(boxCount)));
+    const bagCounts = new Array(k).fill(0);
+    const perPartBags = new Map();
+    for (const item of assignedItems || []) {
+      const b = Math.max(1, Math.min(k, Number(item.bagNumber) || 1));
+      bagCounts[b - 1] += 1;
+      let map = perPartBags.get(item.elementId);
+      if (!map) {
+        map = {};
+        perPartBags.set(item.elementId, map);
+      }
+      map[String(b)] = (map[String(b)] || 0) + 1;
+    }
+    const bags = bagCounts.map((count, idx) => ({
+      bag_number: idx + 1,
+      label: `Caja ${idx + 1}`,
+      piece_count: count,
+    }));
+    const parts = (baseManifest.parts || []).map((p) => {
+      const mapped = perPartBags.get(p.element_id);
+      return {
+        ...p,
+        bag_counts: mapped ? { ...mapped } : { "1": 0 },
+      };
+    });
+    return {
+      ...baseManifest,
+      bags,
+      parts,
+    };
+  }
+
+  setCustomBoxCount(nextCount) {
+    if (!this.manifest) return false;
+    if (this._isGuestRoom()) {
+      this.callbacks.onToast?.("Solo el administrador de la sala puede cambiar las cajas.");
+      return false;
+    }
+    const normalized = this.normalizeCustomBoxCount(nextCount);
+    this.cancelCarry();
+    this.clearSelection();
+    this.customBoxCount = normalized;
+
+    const allLoose = [...this.pilePhysics.items, ...this.pendingPool];
+    for (const item of allLoose) {
+      if (item.origBagNumber == null) {
+        item.origBagNumber =
+          item.mesh?.userData?.origBagNumber ??
+          this._getOrigBagForElement(item.elementId);
+      }
+    }
+
+    if (normalized == null) {
+      for (const item of allLoose) {
+        const orig = item.origBagNumber || 1;
+        item.bagNumber = orig;
+        if (item.mesh?.userData) item.mesh.userData.bagNumber = orig;
+      }
+      this.effectiveManifest = this.manifest;
+    } else {
+      this._assignBalancedBags(allLoose, normalized);
+      for (const item of allLoose) {
+        if (item.mesh?.userData) item.mesh.userData.bagNumber = item.bagNumber;
+      }
+      this.effectiveManifest = this._buildBalancedEffectiveManifest(
+        this.manifest,
+        normalized,
+        allLoose
+      );
+    }
+
+    for (const p of this.placedPieces) {
+      p.mesh.userData.bagNumber = this._getDefaultBagForElement(p.elementId);
+    }
+
+    this.tableLayout = computeTableLayout(this.effectiveManifest);
+    this.sceneManager.applyTableLayout(this.tableLayout);
+    this.pilePhysics.setBagZones(this.tableLayout.bagZones);
+    this.pilePhysics.shakeAll();
+    for (const item of this.pilePhysics.items) {
+      this.sceneManager.syncPileTransform(item.mesh);
+    }
+
+    if (this._isHostRoom()) {
+      this.roomManager.broadcastWorldEvent({
+        type: "world:snapshot",
+        snapshot: this.exportWorldSnapshot(),
+      });
+    }
+    this._emitChange();
+    return true;
   }
 
   getBagZones() {
@@ -420,7 +603,7 @@ export class BuildController {
     const CHUNK_SIZE = 70;
     for (let start = 0; start < total; start += CHUNK_SIZE) {
       const slice = batchItems.slice(start, start + CHUNK_SIZE);
-      const tasks = slice.map(async ({ elementId, bagNumber }) => {
+      const tasks = slice.map(async ({ elementId, bagNumber, origBagNumber }) => {
         const part = this.partsByElementId.get(elementId);
         if (!part) return;
         let loaded;
@@ -441,6 +624,7 @@ export class BuildController {
         group.userData.instanceId = instanceId;
         group.userData.elementId = elementId;
         group.userData.bagNumber = bagNumber;
+        group.userData.origBagNumber = origBagNumber ?? bagNumber;
 
         const bz = this.pilePhysics.getBagZone(bagNumber);
         const idxInBag = bagCounters.get(bagNumber) || 0;
@@ -473,7 +657,8 @@ export class BuildController {
           localBox,
           dropPos,
           true,
-          bagNumber
+          bagNumber,
+          origBagNumber ?? bagNumber
         );
         this.sceneManager.addPileMesh(group);
 
@@ -1057,6 +1242,9 @@ export class BuildController {
     const pivotPos = anchor.mesh.position.clone();
     const compositeBoxes = [];
     const compositeStuds = [];
+    const compositeAntiStuds = [];
+    const compositeConnectors = [];
+    const compositeMeshData = [];
     const localBox = new THREE.Box3();
     const tmpBox = new THREE.Box3();
     const entries = [];
@@ -1076,6 +1264,13 @@ export class BuildController {
           localQuat: relQuat.clone(),
         });
       }
+      compositeMeshData.push({
+        boundsBox: p.localBox.clone(),
+        collisionBoxes: boxes,
+        collisionMeshData: p.mesh.userData.collisionMeshData || null,
+        localPos: relPos.clone(),
+        localQuat: relQuat.clone(),
+      });
       tmpBox.copy(p.localBox).applyMatrix4(mat);
       localBox.union(tmpBox);
 
@@ -1085,6 +1280,17 @@ export class BuildController {
           up: s.up.clone().applyQuaternion(relQuat).normalize(),
           height: s.height,
         });
+      }
+
+      for (const a of p.mesh.userData.antiStuds || []) {
+        compositeAntiStuds.push({
+          pos: a.pos.clone().applyQuaternion(relQuat).add(relPos),
+          dir: a.dir.clone().applyQuaternion(relQuat).normalize(),
+        });
+      }
+
+      for (const conn of p.mesh.userData.connectors || []) {
+        compositeConnectors.push(transformConnector(conn, relQuat, relPos));
       }
 
       tmpUp.set(0, 1, 0).applyQuaternion(relQuat);
@@ -1134,6 +1340,9 @@ export class BuildController {
       localBox,
       compositeBoxes,
       compositeStuds,
+      compositeAntiStuds,
+      compositeConnectors,
+      compositeMeshData,
       bottomReceptors,
       defaultSupportUndersideY: minSupportLocalY,
     };
@@ -1155,6 +1364,9 @@ export class BuildController {
     const groupRoot = new THREE.Group();
     groupRoot.userData.collisionBoxes = meta.compositeBoxes;
     groupRoot.userData.topStuds = meta.compositeStuds;
+    groupRoot.userData.antiStuds = meta.compositeAntiStuds;
+    groupRoot.userData.connectors = meta.compositeConnectors;
+    groupRoot.userData.collisionMeshData = meta.compositeMeshData;
     groupRoot.userData.bottomReceptors = meta.bottomReceptors;
     groupRoot.userData.defaultSupportUndersideY = meta.defaultSupportUndersideY;
 
@@ -1333,11 +1545,31 @@ export class BuildController {
   _recomputeCarryBounds() {
     if (!this.carry) return;
     const { ghost, quaternion, mesh } = this.carry;
-    const prevPos = ghost.position.clone();
-    ghost.position.set(0, 0, 0);
-    ghost.quaternion.copy(quaternion);
-    ghost.updateMatrixWorld(true);
-    const box = new THREE.Box3().setFromObject(ghost);
+    if (this.carry._boundsQuat && this.carry.ghostBox && this.carry._boundsQuat.angleTo(quaternion) < 1e-4) {
+      return;
+    }
+
+    let box;
+    const groupMembers =
+      this.carry.source === "group" && Array.isArray(mesh.userData.collisionMeshData)
+        ? mesh.userData.collisionMeshData
+        : null;
+    if (groupMembers?.length) {
+      const boxes = groupMembers.map((m) => ({
+        box: m.boundsBox || m.collisionBoxes?.[0] || this.carry.localBox,
+        localPos: m.localPos,
+        localQuat: m.localQuat,
+      }));
+      box = computeTransformedWorldBox(boxes, new THREE.Vector3(), quaternion);
+    } else {
+      const prevPos = ghost.position.clone();
+      ghost.position.set(0, 0, 0);
+      ghost.quaternion.copy(quaternion);
+      ghost.updateMatrixWorld(true);
+      box = new THREE.Box3().setFromObject(ghost);
+      ghost.position.copy(prevPos);
+    }
+    this.carry._boundsQuat = quaternion.clone();
     this.carry.ghostBox = box;
     this.carry.ghostLocalMinY = box.min.y;
     this.carry.supportUndersideY =
@@ -1351,9 +1583,9 @@ export class BuildController {
     const tmpPos = new THREE.Vector3();
     const tmpUp = new THREE.Vector3();
     for (const s of studs) {
-      tmpUp.copy(s.up).applyQuaternion(ghost.quaternion);
+      tmpUp.copy(s.up).applyQuaternion(quaternion);
       if (tmpUp.y > 0.85) {
-        refStudPos = tmpPos.copy(s.pos).applyQuaternion(ghost.quaternion);
+        refStudPos = tmpPos.copy(s.pos).applyQuaternion(quaternion);
         break;
       }
     }
@@ -1365,8 +1597,6 @@ export class BuildController {
       this.carry.parityOffsetX = computeWallParityOffset(box.min.x);
       this.carry.parityOffsetZ = computeWallParityOffset(box.min.z);
     }
-
-    ghost.position.copy(prevPos);
   }
 
   /**
@@ -1388,42 +1618,93 @@ export class BuildController {
     const worldUp = new THREE.Vector3();
     const toHit = new THREE.Vector3();
     const toCam = new THREE.Vector3();
+    const rayVec = new THREE.Vector3().subVectors(pt, camPos);
+    const studFront = new THREE.Vector3();
+    const enterPt = new THREE.Vector3();
 
     const considerPiece = (mesh) => {
       const studs = mesh?.userData?.topStuds;
       if (!studs || !studs.length) return;
       mesh.updateMatrixWorld(true);
+      const onHitObj = mesh === hit.object;
+      const isMinifigHead =
+        onHitObj &&
+        Boolean(mesh.userData?.connectors?.some((c) => c.kind === "minifig_neck" && c.role === "socket"));
+      const carryingHeadgear = Boolean(this.carry?.mesh?.userData?.antiStuds?.length);
 
       for (const s of studs) {
         worldPos.copy(s.pos).applyMatrix4(mesh.matrixWorld);
         worldUp.copy(s.up).transformDirection(mesh.matrixWorld).normalize();
 
-        toHit.subVectors(pt, worldPos);
-        const sideProj = toHit.dot(worldUp);
-        if (sideProj < -2.5) continue;
-
         toCam.subVectors(camPos, worldPos);
         if (toCam.dot(worldUp) < -0.15) continue;
 
+        toHit.subVectors(pt, worldPos);
+        const sideProj = toHit.dot(worldUp);
         const distSq = worldPos.distanceToSquared(pt);
         const sameFace = worldUp.dot(cardN) > 0.72;
+        const radialSq = Math.max(0, distSq - sideProj * sideProj);
         let matched = false;
+        let effectiveDistSq = distSq;
 
-        if (sameFace && distSq <= 22 * 22) {
-          matched = true;
-        } else if (
-          (Math.abs(worldUp.y) < 0.5 || rawN.y > 0.25) &&
-          sideProj <= (s.height || 4) + 3.0 &&
-          worldUp.dot(rawN) > 0.1
-        ) {
-          const radialSq = distSq - sideProj * sideProj;
-          if (radialSq <= 10.5 * 10.5) {
-            matched = true;
+        // Si el rayo atravesó el hueco de un stud abierto (`stud2a`) e impactó en la pared
+        // trasera interna de la misma pieza, recuperamos el stud por el que entró el cursor.
+        if (onHitObj && sideProj < -0.5 && toCam.dot(worldUp) > 0.15) {
+          const denom = rayVec.dot(worldUp);
+          if (denom < -0.1) {
+            studFront.copy(worldPos).addScaledVector(worldUp, (s.height || 4) * 0.5);
+            const t = enterPt.subVectors(studFront, camPos).dot(worldUp) / denom;
+            if (t > 0 && t < 0.999) {
+              enterPt.copy(camPos).addScaledVector(rayVec, t);
+              const enterDistSq = enterPt.distanceToSquared(studFront);
+              if (enterDistSq <= 5.5 * 5.5) {
+                matched = true;
+                effectiveDistSq = enterDistSq;
+              }
+            }
           }
         }
 
+        if (!matched && isMinifigHead && carryingHeadgear && sideProj >= -27.5 && radialSq <= 14.5 * 14.5) {
+          matched = true;
+          effectiveDistSq = radialSq;
+        }
+
+        if (!matched && sideProj >= -2.5) {
+          if (sameFace && distSq <= 22 * 22) {
+            matched = true;
+          } else if (
+            onHitObj &&
+            sideProj >= -0.8 &&
+            sideProj <= (s.height || 4) + 1.5 &&
+            radialSq <= 7.0 * 7.0 &&
+            worldUp.dot(rawN) >= -0.08
+          ) {
+            // Golpe directo sobre el borde o pared cilíndrica del stud saliente
+            matched = true;
+            effectiveDistSq = radialSq;
+          } else if (
+            (Math.abs(worldUp.y) < 0.5 || rawN.y > 0.25) &&
+            sideProj <= (s.height || 4) + 3.0 &&
+            worldUp.dot(rawN) > 0.1
+          ) {
+            if (radialSq <= 10.5 * 10.5) {
+              matched = true;
+            }
+          }
+        } else if (
+          !matched &&
+          isMinifigHead &&
+          sideProj >= -4.5 &&
+          worldUp.dot(rawN) > 0.2 &&
+          radialSq <= 13.8 * 13.8
+        ) {
+          matched = true;
+          effectiveDistSq = radialSq;
+        }
+
         if (!matched) continue;
-        const score = distSq - (mesh === hit.object ? 9 : 0) - (sameFace ? 16 : 0);
+        const score = effectiveDistSq - (onHitObj ? 9 : 0) - (sameFace ? 16 : 0);
         if (score < bestScore) {
           bestScore = score;
           const sc = snapNormalToCardinal(worldUp.x, worldUp.y, worldUp.z);
@@ -1486,6 +1767,49 @@ export class BuildController {
         rc.divideScalar(Math.max(1, recs.length));
         return { supportDist: dist, worldReceptors: recs, receptorsCenter: rc };
       }
+
+      // Brackets y piezas SNOT rotadas para que un ala con studs mire hacia +Y:
+      // detectamos el techo inferior real bajo esos studs para apoyar el ala al ras
+      // dejando colgar el faldón vertical sin sumar holgura artificial.
+      if (dirNormal.y > 0.85) {
+        const alignedStuds = (this.carry.mesh.userData.topStuds || []).filter((s) => {
+          const up = s.up.clone().applyQuaternion(quat).normalize();
+          return up.dot(dirNormal) > 0.85;
+        });
+        if (alignedStuds.length > 0) {
+          const zero = new THREE.Vector3(0, 0, 0);
+          const rotBoxes = boxes.map((b) => computeTransformedWorldBox([b], zero, quat));
+          const flangeRecs = [];
+          let flangeMinY = Infinity;
+          for (const s of alignedStuds) {
+            const sw = s.pos.clone().applyQuaternion(quat);
+            let localUnderY = Infinity;
+            for (const rb of rotBoxes) {
+              if (
+                rb.max.x >= sw.x - 8.5 &&
+                rb.min.x <= sw.x + 8.5 &&
+                rb.max.z >= sw.z - 8.5 &&
+                rb.min.z <= sw.z + 8.5 &&
+                rb.max.y <= sw.y + 0.5 &&
+                rb.min.y >= sw.y - 9.0
+              ) {
+                if (rb.min.y < localUnderY) localUnderY = rb.min.y;
+              }
+            }
+            if (localUnderY < Infinity) {
+              flangeRecs.push(new THREE.Vector3(sw.x, localUnderY, sw.z));
+              if (localUnderY < flangeMinY) flangeMinY = localUnderY;
+            }
+          }
+          if (flangeRecs.length === alignedStuds.length && flangeMinY > this.carry.ghostBox.min.y + 1.0) {
+            const rc = new THREE.Vector3();
+            for (const r of flangeRecs) rc.add(r);
+            rc.divideScalar(flangeRecs.length);
+            return { supportDist: -flangeMinY, worldReceptors: flangeRecs, receptorsCenter: rc };
+          }
+        }
+      }
+
       const dist = computeSupportDistanceAlongDir(boxes, quat, dirNormal);
       const center = new THREE.Vector3();
       this.carry.ghostBox.getCenter(center);
@@ -1569,6 +1893,119 @@ export class BuildController {
     offsets.sort((a, b) => a.distanceToSquared(desired) - b.distanceToSquared(desired));
     for (const o of offsets) pushIfValidY(o);
     return cands;
+  }
+
+  /**
+   * Cuando la pieza apoyada no tiene studs útiles en la cara tocada (ej. 5095 con stud notch
+   * o cara inferior de una pieza), busca receptores hembra / muescas del colocado compatibles
+   * con los studs de la pieza llevada.
+   */
+  _findBestTargetReceptor(hit, cardN, ignoreMesh) {
+    if (!hit || hit.kind !== "placed" || !hit.object) return null;
+    const isIgnored = (m) => (ignoreMesh instanceof Set ? ignoreMesh.has(m) : m === ignoreMesh);
+    if (isIgnored(hit.object)) return null;
+
+    const carriedStuds = this.carry?.mesh?.userData?.topStuds;
+    if (!carriedStuds?.length) return null;
+
+    const placedMesh = hit.object;
+    const baseRecs = placedMesh.userData?.bottomReceptors || [];
+    const recRecs = placedMesh.userData?.recessedReceptors || [];
+    if (!baseRecs.length && !recRecs.length) return null;
+
+    placedMesh.updateMatrixWorld(true);
+    const rawPlacedUp = new THREE.Vector3(0, 1, 0)
+      .transformDirection(placedMesh.matrixWorld)
+      .normalize();
+    const uc = snapNormalToCardinal(rawPlacedUp.x, rawPlacedUp.y, rawPlacedUp.z);
+    const placedUp = new THREE.Vector3(uc.x, uc.y, uc.z);
+
+    const pt = hit.point;
+    const camPos = this.sceneManager.camera.position;
+    const toCam = new THREE.Vector3();
+    const worldPos = new THREE.Vector3();
+    const undersideHits = placedUp.dot(cardN) < -0.72;
+
+    let best = null;
+    let bestScore = Infinity;
+
+    const tryList = (list, isRecessed) => {
+      for (const r of list) {
+        worldPos.copy(r).applyMatrix4(placedMesh.matrixWorld);
+        if (isRecessed) {
+          const relAlongUp = new THREE.Vector3().subVectors(pt, worldPos).dot(placedUp);
+          if (relAlongUp > 2.5) continue;
+        } else {
+          if (!undersideHits) continue;
+          toCam.subVectors(camPos, worldPos);
+          if (toCam.dot(placedUp) > 0.15) continue;
+        }
+        const distSq = worldPos.distanceToSquared(pt);
+        if (distSq > 26 * 26) continue;
+        const score = distSq - (isRecessed ? 12 : 0);
+        if (score < bestScore) {
+          bestScore = score;
+          best = {
+            receptorPos: worldPos.clone(),
+            studUp: placedUp.clone(),
+            ownerMesh: placedMesh,
+          };
+        }
+      }
+    };
+
+    tryList(recRecs, true);
+    tryList(baseRecs, false);
+    return best;
+  }
+
+  _countStudSupports(candidatePos, receptors, normalAxis, studUp, ignoreMesh) {
+    if (!receptors?.length) return 0;
+    const reqWorld = new THREE.Vector3();
+    const sWorld = new THREE.Vector3();
+    const sUp = new THREE.Vector3();
+    const isIgnored = (m) => (ignoreMesh instanceof Set ? ignoreMesh.has(m) : m === ignoreMesh);
+    let matches = 0;
+
+    for (const r of receptors) {
+      reqWorld.copy(candidatePos).add(r);
+      let matchedThisRec = false;
+      for (const p of this.placedPieces) {
+        if (isIgnored(p.mesh)) continue;
+        const wb = p.worldBox;
+        if (
+          wb &&
+          (reqWorld.x < wb.min.x - 12 ||
+            reqWorld.x > wb.max.x + 12 ||
+            reqWorld.y < wb.min.y - 12 ||
+            reqWorld.y > wb.max.y + 12 ||
+            reqWorld.z < wb.min.z - 12 ||
+            reqWorld.z > wb.max.z + 12)
+        ) {
+          continue;
+        }
+        const studs = p.mesh.userData.topStuds;
+        if (!studs?.length) continue;
+        p.mesh.updateMatrixWorld(true);
+        for (const s of studs) {
+          sUp.copy(s.up).transformDirection(p.mesh.matrixWorld).normalize();
+          if (sUp.dot(studUp) < 0.85) continue;
+          sWorld.copy(s.pos).applyMatrix4(p.mesh.matrixWorld);
+          if (Math.abs(sWorld[normalAxis] - reqWorld[normalAxis]) > 2.5) continue;
+          const tanDistSq =
+            (normalAxis !== "x" ? (reqWorld.x - sWorld.x) ** 2 : 0) +
+            (normalAxis !== "y" ? (reqWorld.y - sWorld.y) ** 2 : 0) +
+            (normalAxis !== "z" ? (reqWorld.z - sWorld.z) ** 2 : 0);
+          if (tanDistSq <= 3.5 * 3.5) {
+            matchedThisRec = true;
+            break;
+          }
+        }
+        if (matchedThisRec) break;
+      }
+      if (matchedThisRec) matches += 1;
+    }
+    return matches;
   }
 
   /**
@@ -1665,6 +2102,7 @@ export class BuildController {
   _restoreCarryValidState() {
     const lv = this.carry?.lastValid;
     if (!lv) return false;
+    const quatChanged = this.carry.quaternion.angleTo(lv.quaternion) > 1e-4;
     this.carry.quaternion.copy(lv.quaternion);
     this.carry.surfaceNormal.copy(lv.surfaceNormal);
     this.carry.activeMechKind = lv.activeMechKind || null;
@@ -1673,7 +2111,9 @@ export class BuildController {
     this.carry.manualOffsetX = lv.manualOffsetX || 0;
     this.carry.manualOffsetY = lv.manualOffsetY;
     this.carry.manualOffsetZ = lv.manualOffsetZ || 0;
-    this._recomputeCarryBounds();
+    if (quatChanged) {
+      this._recomputeCarryBounds();
+    }
     this.carry.ghost.position.copy(lv.position);
     this.carry.ghost.quaternion.copy(lv.quaternion);
     return true;
@@ -1697,22 +2137,36 @@ export class BuildController {
     const c = snapNormalToCardinal(rawN.x, rawN.y, rawN.z);
     const cardN = new THREE.Vector3(c.x, c.y, c.z);
 
-    // 1. Conexión realista por circulitos ("studs") o encastre mecánico (pin/axle/clip/mano/bisagra/bola)
-    const bestStud = this._findBestConnectionStud(hit, cardN, ignoreMesh);
-    const bestMech =
-      bestStud || this.carry.source === "group"
-        ? null
-        : findBestMechanicalMatch({
-            carriedMesh: this.carry.mesh,
-            carriedQuat: this.carry.quaternion,
-            autoOrient: this.autoOrient,
-            manualTiltApplied: this.carry.manualTiltApplied,
-            spinAngle: this.carry.spinAngle,
-            hit,
-            cardN,
-            placedPieces: this.placedPieces,
-            ignoreMesh,
-          });
+    // 1. Conexión realista por circulitos ("studs") o encastre mecánico (pin/axle/clip/mano/bisagra/bola/minifig)
+    const rawBestStud = this._findBestConnectionStud(hit, cardN, ignoreMesh);
+    const rawBestMech = findBestMechanicalMatch({
+      carriedMesh: this.carry.mesh,
+      carriedQuat: this.carry.quaternion,
+      autoOrient: this.autoOrient,
+      manualTiltApplied: this.carry.manualTiltApplied,
+      spinAngle: this.carry.spinAngle,
+      hit,
+      cardN,
+      placedPieces: this.placedPieces,
+      ignoreMesh,
+    });
+    const preferMech =
+      rawBestMech &&
+      (!rawBestStud ||
+        ((rawBestMech.kind === "minifig_hip" ||
+          rawBestMech.kind === "minifig_neck" ||
+          rawBestMech.kind === "wheel_pin" ||
+          rawBestMech.kind === "wheel_tyre" ||
+          rawBestMech.kind === "bar_axle" ||
+          rawBestMech.kind === "bar") &&
+          rawBestMech.ownerMesh === hit.object &&
+          (rawBestStud.ownerMesh !== hit.object ||
+            (rawBestMech.kind === "minifig_neck" &&
+              !(this.carry?.mesh?.userData?.antiStuds?.length)))));
+    const bestStud = preferMech ? null : rawBestStud;
+    const bestMech = preferMech ? rawBestMech : rawBestStud ? null : rawBestMech;
+    const bestTargetReceptor =
+      !bestStud && !bestMech ? this._findBestTargetReceptor(hit, cardN, ignoreMesh) : null;
 
     if (this.autoOrient && !this.carry.manualTiltApplied) {
       if (bestMech) {
@@ -1727,18 +2181,49 @@ export class BuildController {
           this._recomputeCarryBounds();
         }
       } else {
-        const targetN = bestStud ? bestStud.studUp : WORLD_Y;
-        if (
-          this.carry.activeMechKind ||
-          targetN.distanceToSquared(this.carry.surfaceNormal) > 0.01
-        ) {
-          this.carry.activeMechKind = null;
-          this.carry.surfaceNormal.copy(targetN);
-          this.carry.manualOffsetX = 0;
-          this.carry.manualOffsetY = 0;
-          this.carry.manualOffsetZ = 0;
-          this._applyAutoOrientation(targetN);
-          this._recomputeCarryBounds();
+        const carriedSideStud =
+          bestTargetReceptor && Math.abs(bestTargetReceptor.studUp.y) < 0.5
+            ? (this.carry.mesh.userData.topStuds || []).find(
+                (s) => s.up && Math.abs(s.up.y) < 0.5
+              )
+            : null;
+        if (carriedSideStud) {
+          const localSideUp = carriedSideStud.up.clone();
+          localSideUp.y = 0;
+          if (localSideUp.lengthSq() > 0.01) {
+            localSideUp.normalize();
+            const targetQuat = new THREE.Quaternion().setFromUnitVectors(
+              localSideUp,
+              bestTargetReceptor.studUp
+            );
+            this.carry.activeMechKind = null;
+            this.carry.surfaceNormal.copy(WORLD_Y);
+            if (targetQuat.angleTo(this.carry.quaternion) > 0.001) {
+              this.carry.manualOffsetX = 0;
+              this.carry.manualOffsetY = 0;
+              this.carry.manualOffsetZ = 0;
+              this.carry.quaternion.copy(targetQuat);
+              this._recomputeCarryBounds();
+            }
+          }
+        } else {
+          const targetN = bestStud
+            ? bestStud.studUp
+            : bestTargetReceptor
+              ? bestTargetReceptor.studUp
+              : WORLD_Y;
+          if (
+            this.carry.activeMechKind ||
+            targetN.distanceToSquared(this.carry.surfaceNormal) > 0.01
+          ) {
+            this.carry.activeMechKind = null;
+            this.carry.surfaceNormal.copy(targetN);
+            this.carry.manualOffsetX = 0;
+            this.carry.manualOffsetY = 0;
+            this.carry.manualOffsetZ = 0;
+            this._applyAutoOrientation(targetN);
+            this._recomputeCarryBounds();
+          }
         }
       }
     } else if (!bestMech) {
@@ -1782,31 +2267,101 @@ export class BuildController {
       if (span0 > LDU_STUD + 2) multiAxes.push(ax0);
       if (span1 > LDU_STUD + 2) multiAxes.push(ax1);
 
-      const primaryChoices = [];
-      for (const refR of uniqueReceptors) {
-        const cand = new THREE.Vector3();
-        cand[normalAxis] =
-          bestStud.studPos[normalAxis] + activeNormal[normalAxis] * supportDist;
-        cand[ax0] =
-          span0 <= LDU_STUD + 2
-            ? bestStud.studPos[ax0] - refR[ax0]
-            : snapToReferenceCoord(desiredOrigin[ax0], refR[ax0], bestStud.studPos[ax0], step);
-        cand[ax1] =
-          span1 <= LDU_STUD + 2
-            ? bestStud.studPos[ax1] - refR[ax1]
-            : snapToReferenceCoord(desiredOrigin[ax1], refR[ax1], bestStud.studPos[ax1], step);
-        if (cand.y >= minAllowedY - 0.01) {
-          if (cand.y < minAllowedY) cand.y = minAllowedY;
-          primaryChoices.push(cand);
+      const localUp = new THREE.Vector3(0, 1, 0).applyQuaternion(this.carry.quaternion);
+      const isStandardBaseDown = localUp.dot(activeNormal) > 0.85;
+      const recessedY = isStandardBaseDown
+        ? this.carry.mesh.userData.recessedSupportUndersideY
+        : null;
+      const perCellRecessed = isStandardBaseDown
+        ? this.carry.mesh.userData.recessedReceptors || []
+        : [];
+
+      const distChoices = recessedY != null ? [-recessedY, supportDist] : [supportDist];
+      const primaryChoicesByDist = [];
+      for (const distOpt of distChoices) {
+        const groupChoices = [];
+        for (const refR of uniqueReceptors) {
+          const cand = new THREE.Vector3();
+          cand[normalAxis] =
+            bestStud.studPos[normalAxis] + activeNormal[normalAxis] * distOpt;
+          cand[ax0] =
+            span0 <= LDU_STUD + 2 || worldReceptors.length === 1
+              ? bestStud.studPos[ax0] - refR[ax0]
+              : snapToReferenceCoord(desiredOrigin[ax0], refR[ax0], bestStud.studPos[ax0], step);
+          cand[ax1] =
+            span1 <= LDU_STUD + 2 || worldReceptors.length === 1
+              ? bestStud.studPos[ax1] - refR[ax1]
+              : snapToReferenceCoord(desiredOrigin[ax1], refR[ax1], bestStud.studPos[ax1], step);
+          if (cand.y >= minAllowedY - 0.01) {
+            if (cand.y < minAllowedY) cand.y = minAllowedY;
+            groupChoices.push(cand);
+          }
+        }
+        groupChoices.sort(
+          (a, b) => a.distanceToSquared(desiredOrigin) - b.distanceToSquared(desiredOrigin)
+        );
+        primaryChoicesByDist.push(groupChoices);
+      }
+
+      if (recessedY == null && perCellRecessed.length > 0) {
+        const boxCenter = new THREE.Vector3();
+        this.carry.ghostBox.getCenter(boxCenter);
+        const desiredBoxOrigin = new THREE.Vector3().subVectors(pt, boxCenter);
+        const scoredChoices = [];
+        const seenPos = new Set();
+        const worldRecessed = perCellRecessed.map((r) =>
+          r.clone().applyQuaternion(this.carry.quaternion)
+        );
+        const allRecs = worldReceptors.concat(worldRecessed);
+        const pushScored = (cand, isRecessed) => {
+          const k = `${Math.round(cand.x * 10)}_${Math.round(cand.y * 10)}_${Math.round(cand.z * 10)}`;
+          if (seenPos.has(k)) return;
+          seenPos.add(k);
+          const recsToCheck = isRecessed ? allRecs : worldReceptors;
+          const matches = this._countStudSupports(
+            cand,
+            recsToCheck,
+            normalAxis,
+            activeNormal,
+            ignoreMesh
+          );
+          const d2 = cand.distanceToSquared(desiredBoxOrigin);
+          const score = d2 - (matches >= 2 ? 120 : 0) - (isRecessed ? 10 : 0);
+          scoredChoices.push({ cand, score });
+        };
+
+        for (const cand of primaryChoicesByDist[0] || []) {
+          pushScored(cand, false);
+        }
+        for (const rr of perCellRecessed) {
+          const worldRR = rr.clone().applyQuaternion(this.carry.quaternion);
+          const recCand = new THREE.Vector3(
+            bestStud.studPos.x - worldRR.x,
+            bestStud.studPos.y - worldRR.y,
+            bestStud.studPos.z - worldRR.z
+          );
+          if (recCand.y >= minAllowedY - 0.01) {
+            if (recCand.y < minAllowedY) recCand.y = minAllowedY;
+            pushScored(recCand, true);
+          }
+        }
+        scoredChoices.sort((a, b) => a.score - b.score);
+        for (const entry of scoredChoices) {
+          candList.push(entry.cand);
+        }
+      } else {
+        for (const groupChoices of primaryChoicesByDist) {
+          for (const p of groupChoices) {
+            candList.push(p);
+          }
         }
       }
-      primaryChoices.sort(
-        (a, b) => a.distanceToSquared(desiredOrigin) - b.distanceToSquared(desiredOrigin)
-      );
-      const primary = primaryChoices[0] || desiredOrigin.clone();
-      for (const p of primaryChoices) {
-        candList.push(p);
-      }
+
+      const primary =
+        primaryChoicesByDist[primaryChoicesByDist.length - 1]?.[0] ||
+        primaryChoicesByDist[0]?.[0] ||
+        candList[0] ||
+        desiredOrigin.clone();
 
       // Si choca ligeramente al buscar un hueco justo, probamos deslizar 1 paso en ejes de >1 stud
       // manteniendo conexión real con algún stud del mismo plano
@@ -1819,6 +2374,19 @@ export class BuildController {
             if (p.y < minAllowedY - 0.01) continue;
             if (p.y < minAllowedY) p.y = minAllowedY;
             neighborOffsets.push(p);
+          }
+        }
+        if (multiAxes.length === 2) {
+          const [ma0, ma1] = multiAxes;
+          for (const d0 of [-step, step]) {
+            for (const d1 of [-step, step]) {
+              const p = primary.clone();
+              p[ma0] += d0;
+              p[ma1] += d1;
+              if (p.y < minAllowedY - 0.01) continue;
+              if (p.y < minAllowedY) p.y = minAllowedY;
+              neighborOffsets.push(p);
+            }
           }
         }
         neighborOffsets.sort(
@@ -1848,12 +2416,62 @@ export class BuildController {
       }
     } else if (bestMech) {
       activeNormal = bestMech.targetDir;
-      const snapPos = bestMech.position.clone();
-      if (snapPos.y < minAllowedY && snapPos.y >= minAllowedY - 0.01) {
-        snapPos.y = minAllowedY;
+      const mechPositions = [bestMech.position, ...(bestMech.altPositions || [])];
+      const maxFloorLift =
+        bestMech.kind === "bar_axle" || bestMech.kind === "bar" ? 6.0 : 0.01;
+      for (const rawPos of mechPositions) {
+        const snapPos = rawPos.clone();
+        if (snapPos.y < minAllowedY && snapPos.y >= minAllowedY - maxFloorLift) {
+          snapPos.y = minAllowedY;
+        }
+        if (snapPos.y >= minAllowedY - 0.01) {
+          candList.push(snapPos);
+        }
       }
-      if (snapPos.y >= minAllowedY - 0.01) {
-        candList.push(snapPos);
+    } else if (bestTargetReceptor) {
+      activeNormal = bestTargetReceptor.studUp;
+      const carriedStuds = this.carry.mesh.userData.topStuds || [];
+      const sWorldList = [];
+      const tmpUp = new THREE.Vector3();
+      for (const s of carriedStuds) {
+        tmpUp.copy(s.up).applyQuaternion(this.carry.quaternion).normalize();
+        if (tmpUp.dot(activeNormal) > 0.85) {
+          sWorldList.push(s.pos.clone().applyQuaternion(this.carry.quaternion));
+        }
+      }
+      if (sWorldList.length) {
+        const studsCenter = new THREE.Vector3();
+        for (const sw of sWorldList) studsCenter.add(sw);
+        studsCenter.divideScalar(sWorldList.length);
+        const desiredOrigin = new THREE.Vector3().subVectors(pt, studsCenter);
+
+        const targetMesh = bestTargetReceptor.ownerMesh;
+        targetMesh.updateMatrixWorld(true);
+        const targetRecs = [
+          bestTargetReceptor.receptorPos,
+          ...[
+            ...(targetMesh.userData?.recessedReceptors || []),
+            ...(targetMesh.userData?.bottomReceptors || []),
+          ].map((r) => r.clone().applyMatrix4(targetMesh.matrixWorld)),
+        ];
+
+        const seenCand = new Set();
+        const scored = [];
+        for (let rIdx = 0; rIdx < targetRecs.length; rIdx += 1) {
+          const recW = targetRecs[rIdx];
+          for (const sw of sWorldList) {
+            const cand = new THREE.Vector3().subVectors(recW, sw);
+            if (cand.y < minAllowedY - 0.01) continue;
+            if (cand.y < minAllowedY) cand.y = minAllowedY;
+            const k = `${Math.round(cand.x * 10)}_${Math.round(cand.y * 10)}_${Math.round(cand.z * 10)}`;
+            if (seenCand.has(k)) continue;
+            seenCand.add(k);
+            const d2 = cand.distanceToSquared(desiredOrigin) + (rIdx > 0 ? 150 : 0);
+            scored.push({ cand, d2 });
+          }
+        }
+        scored.sort((a, b) => a.d2 - b.d2);
+        for (const item of scored) candList.push(item.cand);
       }
     } else {
       // 2. Superficie sin studs: mesa libre, cara superior lisa o borde lateral sin stud
@@ -1923,7 +2541,8 @@ export class BuildController {
         if (isWallOrCeiling) {
           const wallCands = this._buildWallPocketCandidates(hit, cardN);
           const localUp = new THREE.Vector3(0, 1, 0).applyQuaternion(this.carry.quaternion);
-          const baseFacesWall = localUp.dot(cardN) > 0.7 || cardN.y < -0.5;
+          const baseFacesWall =
+            localUp.dot(cardN) > 0.7 || cardN.y < -0.5 || Math.abs(floorCand.y - pt.y) > 16;
           if (baseFacesWall) {
             for (const wc of wallCands) candList.push(wc);
             candList.push(floorCand);
@@ -1953,8 +2572,7 @@ export class BuildController {
         pt.z + this.carry.manualOffsetZ
       );
 
-    const candidateMeshData =
-      this.carry.source === "group" ? null : this.carry.mesh.userData.collisionMeshData || null;
+    const candidateMeshData = this.carry.mesh.userData.collisionMeshData || null;
 
     if (!this.collisionEnabled) {
       this.carry.ghost.position.copy(primaryCand);
@@ -1986,8 +2604,58 @@ export class BuildController {
       }
     }
 
-    // En modo horizontal sobre piezas, intentamos apoyar exactamente encima de obstáculos bajos (<= 24 LDU)
-    if (activeNormal.y > 0.85) {
+    if (bestMech?.altMatchTransforms?.length) {
+      for (const altMatch of bestMech.altMatchTransforms) {
+        const altMinY = computeSupportDistanceAlongDir(
+          candidateBoxes,
+          altMatch.quaternion,
+          WORLD_Y
+        );
+        const altLift =
+          altMatch.kind === "bar_axle" || altMatch.kind === "bar" ? 6.0 : 0.01;
+        const altPosList = [altMatch.position, ...(altMatch.altPositions || [])];
+        for (const rawAltPos of altPosList) {
+          const snapPos = rawAltPos.clone();
+          if (this.carry.manualOffsetX || this.carry.manualOffsetY || this.carry.manualOffsetZ) {
+            snapPos.x += this.carry.manualOffsetX;
+            snapPos.y += this.carry.manualOffsetY;
+            snapPos.z += this.carry.manualOffsetZ;
+          }
+          if (snapPos.y < altMinY && snapPos.y >= altMinY - altLift) {
+            snapPos.y = altMinY;
+          }
+          if (snapPos.y < altMinY - 0.01) continue;
+          if (
+            !checkPieceCollision(
+              candidateBoxes,
+              snapPos,
+              altMatch.quaternion,
+              this.placedPieces,
+              ignoreMesh,
+              0.052,
+              candidateMeshData
+            )
+          ) {
+            const quatChanged = altMatch.quaternion.angleTo(this.carry.quaternion) > 0.001;
+            this.carry.quaternion.copy(altMatch.quaternion);
+            this.carry.surfaceNormal.copy(altMatch.targetDir || WORLD_Y);
+            this.carry.activeMechKind = altMatch.kind;
+            if (quatChanged) {
+              this._recomputeCarryBounds();
+            }
+            this.carry.ghost.position.copy(snapPos);
+            this.carry.ghost.quaternion.copy(altMatch.quaternion);
+            this.carry.isColliding = false;
+            this._saveCarryValidState(snapPos);
+            this._emitStatus();
+            return;
+          }
+        }
+      }
+    }
+
+    // En modo horizontal sobre piezas/mesa, apoyamos sobre obstáculos bajos sin saltar desde paredes verticales
+    if (activeNormal.y > 0.85 && (hit.kind === "table" || cardN.y > 0.5)) {
       const colliders = findCollidingPieces(
         candidateBoxes,
         primaryCand,
@@ -2001,7 +2669,8 @@ export class BuildController {
         const { supportDist } = this._resolveCarryConnectionGeometry(WORLD_Y);
         const maxObsY = Math.max(...colliders.map((p) => p.worldBox.max.y));
         const liftedY = Math.max(minAllowedY, maxObsY + supportDist);
-        if (liftedY > primaryCand.y && liftedY - primaryCand.y <= 24) {
+        const maxLiftStep = hit.kind === "table" ? 12 : 24;
+        if (liftedY > primaryCand.y && liftedY - primaryCand.y <= maxLiftStep) {
           const liftedPos = new THREE.Vector3(primaryCand.x, liftedY, primaryCand.z);
           if (
             !checkPieceCollision(
@@ -2029,7 +2698,7 @@ export class BuildController {
     const lv = this.carry.lastValid;
     if (
       lv &&
-      lv.position.distanceTo(primaryCand) <= 38 &&
+      lv.position.distanceTo(primaryCand) <= 20 &&
       lv.surfaceNormal.distanceToSquared(this.carry.surfaceNormal) < 0.05 &&
       this._restoreCarryValidState()
     ) {
@@ -2041,8 +2710,11 @@ export class BuildController {
     // Vista previa no penetrante justo por fuera del obstáculo (sin permitir soltar adentro)
     const escapeDir = bestStud ? bestStud.studUp : WORLD_Y;
     const fallbackPos = primaryCand.clone();
-    for (let s = 1; s <= 6; s += 1) {
-      fallbackPos.copy(primaryCand).addScaledVector(escapeDir, s * LDU_HALF_PLATE);
+    const isLargeGroup = this.carry.source === "group" && (this.carry.origGroup?.length || 0) >= 6;
+    const escapeStep = isLargeGroup ? LDU_PLATE : LDU_HALF_PLATE;
+    const maxEscapeSteps = isLargeGroup ? 7 : 14;
+    for (let s = 1; s <= maxEscapeSteps; s += 1) {
+      fallbackPos.copy(primaryCand).addScaledVector(escapeDir, s * escapeStep);
       if (
         !checkPieceCollision(
           candidateBoxes,

@@ -101,7 +101,8 @@ export class PilePhysics {
     localBox,
     dropPosition = null,
     randomTilt = true,
-    bagNumber = 1
+    bagNumber = 1,
+    origBagNumber = bagNumber
   ) {
     const size = localBox.getSize(new THREE.Vector3());
     const center = localBox.getCenter(new THREE.Vector3());
@@ -150,7 +151,7 @@ export class PilePhysics {
     mesh.updateMatrix();
     mesh.updateMatrixWorld(true);
 
-    const entry = { instanceId, elementId, bagNumber, mesh, body, localBox };
+    const entry = { instanceId, elementId, bagNumber, origBagNumber, mesh, body, localBox };
     this.items.push(entry);
     return entry;
   }
@@ -242,21 +243,139 @@ export class PilePhysics {
   }
 
   /**
-   * Da un pequeño impulso a toda la pila para revolver piezas escondidas abajo.
+   * Revuelve aleatoriamente las piezas dentro de su propia caja/bolsa asignando
+   * nuevas posiciones sin superposición y garantizando que no escapen de los bordes.
    */
   shakeAll() {
+    if (!this.items.length) return;
+
+    const byBag = new Map();
     for (const item of this.items) {
-      item.body.wakeUp();
-      item.body.velocity.set(
-        (Math.random() - 0.5) * 110,
-        70 + Math.random() * 90,
-        (Math.random() - 0.5) * 110
-      );
-      item.body.angularVelocity.set(
-        (Math.random() - 0.5) * 4,
-        (Math.random() - 0.5) * 4,
-        (Math.random() - 0.5) * 4
-      );
+      const bagKey = item.bagNumber ?? 1;
+      if (!byBag.has(bagKey)) byBag.set(bagKey, []);
+      byBag.get(bagKey).push(item);
+    }
+
+    const tmpSize = new THREE.Vector3();
+    for (const [bagNumber, bagItems] of byBag.entries()) {
+      const bz = this.getBagZone(bagNumber);
+      const trayW = Math.max(40, bz.maxX - bz.minX);
+      const trayD = Math.max(40, bz.maxZ - bz.minZ);
+
+      // Orden aleatorio Fisher-Yates para redistribuir completamente qué pieza queda arriba/abajo
+      const shuffled = [...bagItems];
+      for (let i = shuffled.length - 1; i > 0; i -= 1) {
+        const j = Math.floor(Math.random() * (i + 1));
+        const tmp = shuffled[i];
+        shuffled[i] = shuffled[j];
+        shuffled[j] = tmp;
+      }
+
+      const placed = [];
+      for (const item of shuffled) {
+        const lb = item.localBox;
+        if (lb) {
+          lb.getSize(tmpSize);
+        } else {
+          tmpSize.set(20, 16, 20);
+        }
+        const hx = Math.max(4, tmpSize.x * 0.5);
+        const hy = Math.max(3, tmpSize.y * 0.5);
+        const hz = Math.max(4, tmpSize.z * 0.5);
+        const pivotReach = lb
+          ? Math.max(
+              Math.abs(lb.min.x),
+              Math.abs(lb.max.x),
+              Math.abs(lb.min.y),
+              Math.abs(lb.max.y),
+              Math.abs(lb.min.z),
+              Math.abs(lb.max.z)
+            )
+          : Math.max(hx, hy, hz);
+        const rXZ = Math.min(Math.min(trayW, trayD) * 0.25, Math.hypot(hx, hz) + 2);
+
+        const padX = Math.min(trayW * 0.42, Math.max(12, pivotReach + 4));
+        const padZ = Math.min(trayD * 0.42, Math.max(12, pivotReach + 4));
+        const minX = bz.minX + padX;
+        const maxX = Math.max(minX + 1, bz.maxX - padX);
+        const minZ = bz.minZ + padZ;
+        const maxZ = Math.max(minZ + 1, bz.maxZ - padZ);
+
+        const baseDropY = Math.max(24, pivotReach * 0.45 + 14);
+        let bestX = minX + Math.random() * (maxX - minX);
+        let bestZ = minZ + Math.random() * (maxZ - minZ);
+        let bestY = Math.min(195, baseDropY);
+        let bestClearance = -Infinity;
+        let foundClean = false;
+
+        for (let tier = 0; tier < 8 && !foundClean; tier += 1) {
+          const tierY = Math.min(200, baseDropY + tier * 24 + Math.random() * 8);
+          for (let attempt = 0; attempt < 14; attempt += 1) {
+            const cx = minX + Math.random() * (maxX - minX);
+            const cz = minZ + Math.random() * (maxZ - minZ);
+            const cy = tierY;
+
+            let minGap = Infinity;
+            let overlaps = false;
+            for (let k = 0; k < placed.length; k += 1) {
+              const p = placed[k];
+              if (Math.abs(cy - p.y) >= hy + p.hy + 3) continue;
+              const dx = cx - p.x;
+              const dz = cz - p.z;
+              const reqDist = rXZ + p.rXZ + 2;
+              const dSq = dx * dx + dz * dz;
+              if (dSq < reqDist * reqDist) {
+                overlaps = true;
+                const gap = Math.sqrt(dSq) - reqDist;
+                if (gap < minGap) minGap = gap;
+              }
+            }
+
+            if (!overlaps) {
+              bestX = cx;
+              bestZ = cz;
+              bestY = cy;
+              foundClean = true;
+              break;
+            }
+            if (minGap > bestClearance) {
+              bestClearance = minGap;
+              bestX = cx;
+              bestZ = cz;
+              bestY = cy;
+            }
+          }
+        }
+
+        placed.push({ x: bestX, y: bestY, z: bestZ, rXZ, hy });
+
+        item.body.wakeUp();
+        item.body.position.set(bestX, bestY, bestZ);
+        item.body.quaternion.setFromEuler(
+          (Math.random() - 0.5) * 0.45,
+          Math.random() * Math.PI * 2,
+          (Math.random() - 0.5) * 0.45
+        );
+        item.body.velocity.set(
+          (Math.random() - 0.5) * 35,
+          -15 - Math.random() * 25,
+          (Math.random() - 0.5) * 35
+        );
+        item.body.angularVelocity.set(
+          (Math.random() - 0.5) * 3,
+          (Math.random() - 0.5) * 3,
+          (Math.random() - 0.5) * 3
+        );
+        item.mesh.position.set(bestX, bestY, bestZ);
+        item.mesh.quaternion.set(
+          item.body.quaternion.x,
+          item.body.quaternion.y,
+          item.body.quaternion.z,
+          item.body.quaternion.w
+        );
+        item.mesh.updateMatrix();
+        item.mesh.updateMatrixWorld(true);
+      }
     }
   }
 

@@ -5,6 +5,52 @@ import {
   renameSlotOnDisk,
   saveSlotToDisk,
 } from "../builder/storage.js";
+import { buildManualHistoryKey, clearSavedManualProgress } from "./manualDrawer.js";
+
+export const LOBBY_SETS_PER_PAGE = 60;
+export const LOBBY_MAX_PAGE_BUTTONS = 6;
+
+/**
+ * Calcula la ventana de paginación (máximo 6 botones numéricos tomando el extremo
+ * superior como referencia: ej. pág 3 -> [1..6], pág 8 -> [3..8]).
+ */
+export function computePaginationWindow(
+  currentPage,
+  totalItems,
+  perPage = LOBBY_SETS_PER_PAGE,
+  maxButtons = LOBBY_MAX_PAGE_BUTTONS
+) {
+  const safeTotal = Math.max(0, Number(totalItems) || 0);
+  const totalPages = Math.max(1, Math.ceil(safeTotal / perPage));
+  const safePage = Math.max(1, Math.min(totalPages, Math.floor(Number(currentPage) || 1)));
+  if (totalPages <= 1) {
+    return {
+      totalPages: 1,
+      currentPage: 1,
+      startIndex: 0,
+      endIndex: Math.min(safeTotal, perPage),
+      pages: [1],
+      showArrows: false,
+    };
+  }
+  const visibleCount = Math.min(totalPages, maxButtons);
+  const endPage = Math.min(totalPages, Math.max(visibleCount, safePage));
+  const startPage = Math.max(1, endPage - visibleCount + 1);
+  const pages = [];
+  for (let p = startPage; p <= endPage; p += 1) {
+    pages.push(p);
+  }
+  const startIndex = (safePage - 1) * perPage;
+  const endIndex = Math.min(safeTotal, startIndex + perPage);
+  return {
+    totalPages,
+    currentPage: safePage,
+    startIndex,
+    endIndex,
+    pages,
+    showArrows: true,
+  };
+}
 
 function normalizeSearch(value) {
   return String(value || "")
@@ -46,7 +92,9 @@ export class LobbyView {
 
     this.screenEl = document.getElementById("lobby-screen");
     this.gridEl = document.getElementById("lobby-sets-grid");
+    this.scrollWrapEl = this.gridEl?.parentElement || null;
     this.emptyEl = document.getElementById("lobby-empty");
+    this.paginationEl = document.getElementById("lobby-pagination");
     this.searchEl = document.getElementById("lobby-search");
     this.countEl = document.getElementById("lobby-count");
     this.dropzoneEl = document.getElementById("pdf-dropzone");
@@ -77,6 +125,7 @@ export class LobbyView {
     this.slotsListEl = document.getElementById("slots-list");
 
     this.sets = [];
+    this.currentPage = 1;
     this.activeModalSet = null;
     this.activeSlots = [];
     this.editingSlotNumber = null;
@@ -88,7 +137,10 @@ export class LobbyView {
   }
 
   _bindEvents() {
-    this.searchEl.addEventListener("input", () => this.renderSets());
+    this.searchEl.addEventListener("input", () => {
+      this.currentPage = 1;
+      this.renderSets();
+    });
 
     this.uploadInputEl.addEventListener("change", async (ev) => {
       const files = Array.from(ev.target.files || []);
@@ -338,7 +390,11 @@ export class LobbyView {
     this.gridEl.innerHTML = "";
     this.emptyEl.classList.toggle("hidden", filtered.length > 0);
 
-    for (const setInfo of filtered) {
+    const pageState = computePaginationWindow(this.currentPage, filtered.length);
+    this.currentPage = pageState.currentPage;
+    const pageSets = filtered.slice(pageState.startIndex, pageState.endIndex);
+
+    for (const setInfo of pageSets) {
       const card = document.createElement("button");
       card.type = "button";
       card.className = "set-card";
@@ -384,6 +440,69 @@ export class LobbyView {
       card.append(thumb, body);
       card.addEventListener("click", () => this.openSetModal(setInfo));
       this.gridEl.appendChild(card);
+    }
+
+    this._renderPagination(filtered.length, pageState);
+  }
+
+  _goToPage(pageNum) {
+    this.currentPage = pageNum;
+    this.renderSets();
+    if (this.scrollWrapEl) {
+      this.scrollWrapEl.scrollTop = 0;
+    }
+  }
+
+  _renderPagination(totalItems, pageState) {
+    if (!this.paginationEl) return;
+    this.paginationEl.innerHTML = "";
+    if (!totalItems) {
+      this.paginationEl.classList.add("hidden");
+      return;
+    }
+    this.paginationEl.classList.remove("hidden");
+
+    const { totalPages, currentPage, pages, showArrows } = pageState;
+
+    if (showArrows) {
+      const prevBtn = document.createElement("button");
+      prevBtn.type = "button";
+      prevBtn.className = "lobby-page-btn lobby-page-arrow";
+      prevBtn.textContent = "<";
+      prevBtn.title = "Página anterior";
+      prevBtn.setAttribute("aria-label", "Página anterior");
+      prevBtn.disabled = currentPage <= 1;
+      prevBtn.addEventListener("click", () => this._goToPage(currentPage - 1));
+      this.paginationEl.appendChild(prevBtn);
+    }
+
+    for (const p of pages) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `lobby-page-btn${p === currentPage ? " is-active" : ""}`;
+      btn.textContent = String(p);
+      btn.setAttribute("aria-label", `Página ${p}`);
+      if (p === currentPage) {
+        btn.setAttribute("aria-current", "page");
+      }
+      if (totalPages === 1) {
+        btn.disabled = true;
+      } else if (p !== currentPage) {
+        btn.addEventListener("click", () => this._goToPage(p));
+      }
+      this.paginationEl.appendChild(btn);
+    }
+
+    if (showArrows) {
+      const nextBtn = document.createElement("button");
+      nextBtn.type = "button";
+      nextBtn.className = "lobby-page-btn lobby-page-arrow";
+      nextBtn.textContent = ">";
+      nextBtn.title = "Página siguiente";
+      nextBtn.setAttribute("aria-label", "Página siguiente");
+      nextBtn.disabled = currentPage >= totalPages;
+      nextBtn.addEventListener("click", () => this._goToPage(currentPage + 1));
+      this.paginationEl.appendChild(nextBtn);
     }
   }
 
@@ -523,8 +642,9 @@ export class LobbyView {
     this.slotsListEl.innerHTML = "";
 
     for (const slot of this.activeSlots) {
+      const isEditing = this.editingSlotNumber === slot.slot;
       const card = document.createElement("div");
-      card.className = `slot-card${slot.exists ? " is-saved" : ""}`;
+      card.className = `slot-card${slot.exists ? " is-saved" : ""}${isEditing ? " is-editing" : ""}`;
       card.dataset.slot = String(slot.slot);
 
       const top = document.createElement("div");
@@ -538,7 +658,7 @@ export class LobbyView {
       badge.textContent = `Slot ${slot.slot}`;
       titleRow.appendChild(badge);
 
-      if (this.editingSlotNumber === slot.slot) {
+      if (isEditing) {
         const input = document.createElement("input");
         input.type = "text";
         input.className = "slot-rename-input";
@@ -562,13 +682,13 @@ export class LobbyView {
 
         const saveRenameBtn = document.createElement("button");
         saveRenameBtn.type = "button";
-        saveRenameBtn.className = "btn btn-sm btn-accent";
+        saveRenameBtn.className = "btn btn-accent slot-rename-btn";
         saveRenameBtn.textContent = "Ok";
         saveRenameBtn.addEventListener("click", () => this._commitRename(slot.slot, input.value));
 
         const cancelRenameBtn = document.createElement("button");
         cancelRenameBtn.type = "button";
-        cancelRenameBtn.className = "btn btn-sm";
+        cancelRenameBtn.className = "btn slot-rename-btn";
         cancelRenameBtn.textContent = "Cancelar";
         cancelRenameBtn.addEventListener("click", () => {
           this.editingSlotNumber = null;
@@ -711,6 +831,7 @@ export class LobbyView {
     }
     try {
       const res = await deleteSlotOnDisk(setInfo.set_number, slot.slot);
+      clearSavedManualProgress(buildManualHistoryKey(setInfo.set_number, slot.slot));
       if (res?.slots) {
         this.activeSlots = res.slots;
         this._syncCardSavesCount(setInfo.set_number, this.activeSlots);

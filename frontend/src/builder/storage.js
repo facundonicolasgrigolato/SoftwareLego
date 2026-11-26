@@ -82,12 +82,28 @@ export async function loadSlotSave(setNumber, slot) {
   }
 }
 
-export async function saveSlotToDisk(setNumber, slot, { name, pieces, history } = {}) {
+export async function saveSlotToDisk(
+  setNumber,
+  slot,
+  { name, pieces, history, manualPage, customBoxCount } = {}
+) {
   const payload = {
     name,
     pieces: Array.isArray(pieces) ? pieces : [],
     history: serializeSlotHistory(history),
   };
+  const pageNum = Number(manualPage);
+  if (Number.isFinite(pageNum) && pageNum >= 1) {
+    payload.manual_page = Math.round(pageNum);
+  }
+  if (customBoxCount === null) {
+    payload.custom_box_count = null;
+  } else {
+    const boxNum = Number(customBoxCount);
+    if (Number.isFinite(boxNum) && boxNum >= 1) {
+      payload.custom_box_count = Math.max(1, Math.min(24, Math.round(boxNum)));
+    }
+  }
   return requestJson(`/api/saves/${encodeURIComponent(setNumber)}/${encodeURIComponent(slot)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },

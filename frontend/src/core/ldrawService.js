@@ -54,13 +54,16 @@ export class LDrawService {
       up: s.up.clone(),
       height: s.height,
     }));
+    clone.userData.antiStuds = proto.antiStuds || [];
     clone.userData.connectors = proto.connectors;
     clone.userData.pinHoles = proto.pinHoles;
     clone.userData.pinConnectors = proto.pinConnectors;
     clone.userData.defaultSupportUndersideY = proto.defaultSupportUndersideY;
+    clone.userData.recessedSupportUndersideY = proto.recessedSupportUndersideY;
     clone.userData.collisionBoxes = proto.collisionBoxes.map((b) => b.clone());
     clone.userData.collisionMeshData = proto.collisionMeshData;
     clone.userData.bottomReceptors = proto.bottomReceptors.map((r) => r.clone());
+    clone.userData.recessedReceptors = proto.recessedReceptors.map((r) => r.clone());
     clone.userData.protoKey = key;
     clone.userData.batchedMeshGeo = proto.batchedMeshGeo;
     clone.userData.batchedEdgeGeo = proto.batchedEdgeGeo;
@@ -117,8 +120,8 @@ export class LDrawService {
    * Extrae studs (`stud*.dat`), agujeros Technic (`peghole.dat`) y vástagos de pin
    * (`connect*` / `confric*`) en coordenadas del `wrapper` (+Y arriba) con un único recorrido.
    */
-  _extractPartFeatures(datFileName) {
-    return extractPartFeatures(datFileName, this.loader.partsCache?.parseCache);
+  _extractPartFeatures(datFileName, localBox = null) {
+    return extractPartFeatures(datFileName, this.loader.partsCache?.parseCache, localBox);
   }
 
   _extractStudPositions(datFileName) {
@@ -167,22 +170,37 @@ export class LDrawService {
 
     wrapper.updateMatrixWorld(true);
     const localBox = new THREE.Box3().setFromObject(wrapper);
-    const { topStuds, pinBarrels, connectors } = this._extractPartFeatures(datFile);
+    const { topStuds, antiStuds, pinBarrels, connectors } = this._extractPartFeatures(
+      datFile,
+      localBox
+    );
     const pinHoles = connectors.filter((c) => c.kind === "pin" && c.role === "hole");
     const pinConnectors = connectors.filter((c) => c.kind === "pin" && c.role === "plug");
-    const defaultSupportUndersideY = LDrawService.computeSupportUndersideY(wrapper, localBox);
+    const { supportY: defaultSupportUndersideY, recessedY: recessedSupportUndersideY } =
+      LDrawService.computeSupportUndersideProfile(wrapper, localBox, antiStuds);
     const collisionBoxes = LDrawService.buildCollisionBoxes(wrapper, localBox, topStuds);
+    const isMinifigHead =
+      connectors.some((c) => c.kind === "minifig_neck" && c.role === "socket") &&
+      topStuds.length === 1 &&
+      topStuds[0].up.y > 0.85;
     const collisionMeshData = buildCollisionMeshData(
       wrapper,
       topStuds,
       collisionBoxes,
-      pinBarrels
+      pinBarrels,
+      {
+        antiStuds,
+        isMinifigHead,
+        headTopStud: isMinifigHead ? topStuds[0] : null,
+      }
     );
-    const bottomReceptors = LDrawService.extractBottomReceptors(
+    const { bottomReceptors, recessedReceptors } = LDrawService.extractBottomReceptors(
       collisionBoxes,
       localBox,
       defaultSupportUndersideY,
-      topStuds
+      topStuds,
+      wrapper,
+      antiStuds
     );
     const { batchedMeshGeo, batchedEdgeGeo } = LDrawService.buildBatchedGeometries(
       wrapper,
@@ -192,13 +210,16 @@ export class LDrawService {
       group: wrapper,
       localBox,
       topStuds,
+      antiStuds,
       connectors,
       pinHoles,
       pinConnectors,
       defaultSupportUndersideY,
+      recessedSupportUndersideY,
       collisionBoxes,
       collisionMeshData,
       bottomReceptors,
+      recessedReceptors,
       batchedMeshGeo,
       batchedEdgeGeo,
     };
@@ -209,28 +230,21 @@ export class LDrawService {
    * en una geometría no indexada, necesario tras aplicar una transformación espejo (`det < 0`).
    */
   static _reverseTriangleWinding(geo) {
-    const attrs = [
-      geo.attributes.position,
-      geo.attributes.normal,
-      geo.attributes.color,
-    ].filter(Boolean);
-    const count = geo.attributes.position?.count || 0;
-    for (let i = 0; i + 2 < count; i += 3) {
-      const j = i + 1;
-      const k = i + 2;
-      for (const attr of attrs) {
-        const itemSize = attr.itemSize;
-        const arr = attr.array;
-        const baseJ = j * itemSize;
-        const baseK = k * itemSize;
-        for (let d = 0; d < itemSize; d += 1) {
-          const tmp = arr[baseJ + d];
-          arr[baseJ + d] = arr[baseK + d];
-          arr[baseK + d] = tmp;
+    const pos = geo.attributes.position;
+    if (!pos) return;
+    const count = pos.count;
+    for (const attr of Object.values(geo.attributes)) {
+      const itemSize = attr.itemSize;
+      const arr = attr.array;
+      for (let i = 0; i + 2 < count; i += 3) {
+        for (let k = 0; k < itemSize; k += 1) {
+          const i1 = (i + 1) * itemSize + k;
+          const i2 = (i + 2) * itemSize + k;
+          const tmp = arr[i1];
+          arr[i1] = arr[i2];
+          arr[i2] = tmp;
         }
       }
-    }
-    for (const attr of attrs) {
       attr.needsUpdate = true;
     }
   }
@@ -551,10 +565,15 @@ export class LDrawService {
   }
 
   /**
-   * Analiza la geometría ya rotada para detectar piezas colgantes (brackets Down,
-   * faldones, bisagras) cuyo plano de apoyo horizontal está por encima de `box.min.y`.
+   * Analiza la geometría ya rotada para detectar tanto el plano de apoyo principal
+   * (`supportY`) como un eventual techo/hueco rebajado (`recessedY`, p. ej. 66792) que
+   * permite encastrar sobre un plate/brick angosto sin chocar las faldillas laterales.
    */
   static computeSupportUndersideY(object3D, box) {
+    return LDrawService.computeSupportUndersideProfile(object3D, box).supportY;
+  }
+
+  static computeSupportUndersideProfile(object3D, box, antiStuds = []) {
     const totalW = Math.max(1, box.max.x - box.min.x);
     const totalD = Math.max(1, box.max.z - box.min.z);
     const totalArea = totalW * totalD;
@@ -631,7 +650,7 @@ export class LDrawService {
       }
     });
 
-    if (!hasSlice) return box.min.y;
+    if (!hasSlice) return { supportY: box.min.y, recessedY: null };
     const sliceArea = Math.max(0, sliceMaxX - sliceMinX) * Math.max(0, sliceMaxZ - sliceMinZ);
     const bottomArea = hasBottomSlice
       ? Math.max(0, bottomMaxX - bottomMinX) * Math.max(0, bottomMaxZ - bottomMinZ)
@@ -644,64 +663,209 @@ export class LDrawService {
       if (area > maxBucketArea) maxBucketArea = area;
     }
 
+    let supportY = box.min.y;
     if (sliceArea / totalArea >= 0.35) {
       // Si el borde inferior (`box.min.y + 1.2`) cubre la huella de la pieza (ej. plato 4740)
       // o tiene cara plana real, apoya en `box.min.y`. Solo elevamos en salientes chicas (ej. anillo de 4081b).
       const minArea = buckets.get(minYBucket) || 0;
       if (bottomArea / totalArea >= 0.35 || minArea >= maxBucketArea * 0.08 || totalDownArea <= 0) {
-        return box.min.y;
-      }
-      for (const [yVal, area] of [...buckets.entries()].sort((a, b) => a[0] - b[0])) {
-        if (yVal >= minYBucket && yVal <= minYBucket + 4.5 && area >= maxBucketArea * 0.15) {
-          return yVal;
+        supportY = box.min.y;
+      } else {
+        for (const [yVal, area] of [...buckets.entries()].sort((a, b) => a[0] - b[0])) {
+          if (yVal >= minYBucket && yVal <= minYBucket + 4.5 && area >= maxBucketArea * 0.15) {
+            supportY = yVal;
+            break;
+          }
         }
       }
-      return box.min.y;
+    } else {
+      // Es una pieza colgante (ej. bracket 44728): buscamos el plano horizontal más bajo
+      // de su pestaña superior (borde real de apoyo, por ej. -8 y no el hueco interno -4).
+      const candidates = [];
+      let bestHangArea = -1;
+      for (const [yVal, area] of buckets.entries()) {
+        if (yVal < 0 && yVal > box.min.y + 8) {
+          candidates.push([yVal, area]);
+          if (area > bestHangArea) bestHangArea = area;
+        }
+      }
+      if (candidates.length) {
+        candidates.sort((a, b) => a[0] - b[0]);
+        supportY = candidates[0][0];
+        for (const [yVal, area] of candidates) {
+          if (area >= bestHangArea * 0.08) {
+            supportY = yVal;
+            break;
+          }
+        }
+      }
+      if (antiStuds.length > 0) {
+        const antiY = Math.round(antiStuds[0].pos.y * 1000) / 1000;
+        if (antiY > box.min.y + 1.5 && antiY <= box.max.y - 1) {
+          supportY = antiY;
+        }
+      }
     }
 
-    // Es una pieza colgante (ej. bracket 44728): buscamos el plano horizontal más bajo
-    // de su pestaña superior (borde real de apoyo, por ej. -8 y no el hueco interno -4).
-    const candidates = [];
-    let bestHangArea = -1;
-    for (const [yVal, area] of buckets.entries()) {
-      if (yVal < 0 && yVal > box.min.y + 8) {
-        candidates.push([yVal, area]);
-        if (area > bestHangArea) bestHangArea = area;
+    // Techo interior real (ej. -8 en 66792 con faldillas en -16) que domina sobre el borde
+    let recessedY = null;
+    if (supportY <= -12) {
+      const defBucket = Math.round(supportY / 4) * 4;
+      const defArea = buckets.get(defBucket) || 0;
+      for (const [yVal, area] of [...buckets.entries()].sort((a, b) => a[0] - b[0])) {
+        if (yVal >= defBucket + 6 && yVal <= -8 && area > defArea * 1.1 && area >= maxBucketArea * 0.12) {
+          recessedY = yVal;
+          break;
+        }
       }
     }
-    if (!candidates.length) return box.min.y;
-    candidates.sort((a, b) => a[0] - b[0]);
-    for (const [yVal, area] of candidates) {
-      if (area >= bestHangArea * 0.08) {
-        return yVal;
-      }
-    }
-    return candidates[0][0];
+
+    return { supportY, recessedY };
   }
 
   /**
    * Calcula los puntos hembra (receptores de encastre en el plano inferior `supportY`)
+   * y muescas elevadas (`recessedReceptors`, ej. +8 LDU en 5095/5093 con stud notch)
    * usando studs reales hacia +Y cuando coinciden con toda la base, o grilla 20x20 de la huella.
    */
-  static extractBottomReceptors(collisionBoxes, localBox, supportY, topStuds = []) {
+  static extractBottomReceptors(
+    collisionBoxes,
+    localBox,
+    supportY,
+    topStuds = [],
+    object3D = null,
+    antiStuds = []
+  ) {
     const upStuds = topStuds.filter((s) => s.up && s.up.y > 0.85);
+    const matchingAntiStuds = (antiStuds || []).filter(
+      (a) => Math.abs(a.pos.y - supportY) <= 1.0
+    );
+    if (upStuds.length === 0 && matchingAntiStuds.length > 0 && supportY > localBox.min.y + 1.5) {
+      return {
+        bottomReceptors: matchingAntiStuds.map(
+          (a) =>
+            new THREE.Vector3(
+              Math.round(a.pos.x * 10) / 10,
+              supportY,
+              Math.round(a.pos.z * 10) / 10
+            )
+        ),
+        recessedReceptors: [],
+      };
+    }
     const bandMinY = supportY - 0.5;
     const bandMaxY = supportY + 5.5;
     const sliceBoxes = collisionBoxes.filter(
       (b) => b.max.y >= bandMinY && b.min.y <= bandMaxY
     );
 
-    if (!sliceBoxes.length) {
-      if (upStuds.length) {
-        return upStuds.map((s) => new THREE.Vector3(s.pos.x, supportY, s.pos.z));
+    const NOTCH_OFFSETS = [8, 16, 24];
+    const lowTriCentroids = [];
+    const cellTriBounds = [];
+    const notchTrisByDy = new Map(NOTCH_OFFSETS.map((d) => [d, []]));
+    if (object3D) {
+      const a = new THREE.Vector3();
+      const b = new THREE.Vector3();
+      const c = new THREE.Vector3();
+      const ab = new THREE.Vector3();
+      const ac = new THREE.Vector3();
+      const cross = new THREE.Vector3();
+      object3D.updateMatrixWorld(true);
+      object3D.traverse((child) => {
+        if (!child.isMesh || !child.geometry) return;
+        const pos = child.geometry.attributes.position;
+        if (!pos) return;
+        const index = child.geometry.index;
+        const mat = child.matrixWorld;
+        const triCount = index ? index.count / 3 : pos.count / 3;
+        for (let i = 0; i < triCount; i += 1) {
+          const i0 = index ? index.getX(i * 3) : i * 3;
+          const i1 = index ? index.getX(i * 3 + 1) : i * 3 + 1;
+          const i2 = index ? index.getX(i * 3 + 2) : i * 3 + 2;
+          a.fromBufferAttribute(pos, i0).applyMatrix4(mat);
+          b.fromBufferAttribute(pos, i1).applyMatrix4(mat);
+          c.fromBufferAttribute(pos, i2).applyMatrix4(mat);
+          const cx = (a.x + b.x + c.x) / 3;
+          const cy = (a.y + b.y + c.y) / 3;
+          const cz = (a.z + b.z + c.z) / 3;
+          cellTriBounds.push({ x: cx, y: cy, z: cz });
+          if (cy <= supportY + 2.5) {
+            lowTriCentroids.push({ x: cx, z: cz });
+          }
+          for (const dy of NOTCH_OFFSETS) {
+            if (localBox.max.y >= supportY + dy + 3.5 && Math.abs(cy - (supportY + dy)) <= 1.2) {
+              ab.subVectors(b, a);
+              ac.subVectors(c, a);
+              cross.crossVectors(ab, ac);
+              const area2 = cross.length();
+              if (area2 > 1e-4 && Math.abs(cross.y) / area2 > 0.85) {
+                notchTrisByDy.get(dy).push({ x: cx, z: cz, area2 });
+              }
+            }
+          }
+        }
+      });
+    }
+
+    const hasLowMeshInCell = (cx, cz) => {
+      if (!object3D || lowTriCentroids.length === 0) return true;
+      for (const t of lowTriCentroids) {
+        if (t.x > cx - 9 && t.x < cx + 9 && t.z > cz - 9 && t.z < cz + 9) {
+          return true;
+        }
       }
-      return [
-        new THREE.Vector3(
-          (localBox.min.x + localBox.max.x) * 0.5,
-          supportY,
-          (localBox.min.z + localBox.max.z) * 0.5
-        ),
-      ];
+      return false;
+    };
+
+    const findNotchRoofYInCell = (cx, cz) => {
+      if (!object3D || localBox.max.y < supportY + 11.5) return null;
+      let cellMaxY = -Infinity;
+      for (const t of cellTriBounds) {
+        if (t.x >= cx - 9 && t.x <= cx + 9 && t.z >= cz - 9 && t.z <= cz + 9 && t.y > cellMaxY) {
+          cellMaxY = t.y;
+        }
+      }
+      for (const dy of NOTCH_OFFSETS) {
+        const targetY = supportY + dy;
+        if (localBox.max.y < targetY + 3.5 || cellMaxY < targetY + 3.5) continue;
+        // Verificamos que el centro de la celda debajo de targetY esté despejado (sin cuña diagonal)
+        let blockedBelow = false;
+        for (const t of cellTriBounds) {
+          if (
+            t.y > supportY + 2.5 &&
+            t.y < targetY - 1.5 &&
+            t.x >= cx - 5 &&
+            t.x <= cx + 5 &&
+            t.z >= cz - 5 &&
+            t.z <= cz + 5
+          ) {
+            blockedBelow = true;
+            break;
+          }
+        }
+        if (blockedBelow) continue;
+        let area2 = 0;
+        for (const t of notchTrisByDy.get(dy)) {
+          if (t.x >= cx - 9 && t.x <= cx + 9 && t.z >= cz - 9 && t.z <= cz + 9) {
+            area2 += t.area2;
+          }
+        }
+        if (area2 >= 80) return targetY;
+      }
+      return null;
+    };
+
+    if (!sliceBoxes.length) {
+      const fallback = upStuds.length
+        ? upStuds.map((s) => new THREE.Vector3(s.pos.x, supportY, s.pos.z))
+        : [
+            new THREE.Vector3(
+              (localBox.min.x + localBox.max.x) * 0.5,
+              supportY,
+              (localBox.min.z + localBox.max.z) * 0.5
+            ),
+          ];
+      return { bottomReceptors: fallback, recessedReceptors: [] };
     }
 
     // Solo consideramos cajas que formen parte del cuerpo base (>= 12 LDU en al menos un eje,
@@ -722,11 +886,54 @@ export class LDrawService {
       if (b.max.z > maxZ) maxZ = b.max.z;
     }
 
+    // Si una celda única quedó truncada (< 19.5 LDU) por extremos curvos < 12 LDU (ej. 24246),
+    // recuperamos su ancho real con cajas >= 8 LDU dentro de 1 stud (<= 20.5 LDU).
+    const slice8 = sliceBoxes.filter(
+      (b) => Math.max(b.max.x - b.min.x, b.max.z - b.min.z) >= 8
+    );
+    if (slice8.length) {
+      let s8MinX = Infinity;
+      let s8MaxX = -Infinity;
+      let s8MinZ = Infinity;
+      let s8MaxZ = -Infinity;
+      for (const b of slice8) {
+        if (b.min.x < s8MinX) s8MinX = b.min.x;
+        if (b.max.x > s8MaxX) s8MaxX = b.max.x;
+        if (b.min.z < s8MinZ) s8MinZ = b.min.z;
+        if (b.max.z > s8MaxZ) s8MaxZ = b.max.z;
+      }
+      if (maxX - minX < 19.5 && s8MaxX - s8MinX > maxX - minX && s8MaxX - s8MinX <= 20.5) {
+        minX = s8MinX;
+        maxX = s8MaxX;
+      }
+      if (maxZ - minZ < 19.5 && s8MaxZ - s8MinZ > maxZ - minZ && s8MaxZ - s8MinZ <= 20.5) {
+        minZ = s8MinZ;
+        maxZ = s8MaxZ;
+      }
+    }
+
+    const alignStart = (rawStart, ax) => {
+      const distinctAxisStuds = new Set(upStuds.map((s) => Math.round(s.pos[ax])));
+      if (distinctAxisStuds.size >= 2) {
+        const ref = upStuds[0].pos[ax];
+        const aligned = Math.round((rawStart - ref) / 20) * 20 + ref;
+        if (Math.abs(aligned - rawStart) <= 10.5) return Math.round(aligned * 10) / 10;
+      }
+      const lbMin = localBox.min[ax];
+      if (Math.abs(lbMin - Math.round(lbMin / 10) * 10) < 0.5) {
+        const ref = Math.round(lbMin / 10) * 10 + 10;
+        const aligned = Math.round((rawStart - ref) / 20) * 20 + ref;
+        if (Math.abs(aligned - rawStart) <= 3.5) return Math.round(aligned * 10) / 10;
+      }
+      return rawStart;
+    };
+
     const countX = Math.max(1, Math.round((maxX - minX) / 20));
     const countZ = Math.max(1, Math.round((maxZ - minZ) / 20));
     const gridCells = [];
-    const startX = Math.round((minX + 10) * 10) / 10;
-    const startZ = Math.round((minZ + 10) * 10) / 10;
+    const recessedReceptors = [];
+    const startX = alignStart(Math.round((minX + 10) * 10) / 10, "x");
+    const startZ = alignStart(Math.round((minZ + 10) * 10) / 10, "z");
     const checkY = supportY + 2.5;
 
     const hasBaseCellAt = (cx, cz) => {
@@ -753,11 +960,62 @@ export class LDrawService {
     };
 
     for (let ix = 0; ix < countX; ix += 1) {
-      const cx = countX === 1 ? Math.round(((minX + maxX) * 0.5) * 10) / 10 : startX + ix * 20;
+      const cx =
+        countX === 1
+          ? alignStart(Math.round(((minX + maxX) * 0.5) * 10) / 10, "x")
+          : startX + ix * 20;
       for (let iz = 0; iz < countZ; iz += 1) {
-        const cz = countZ === 1 ? Math.round(((minZ + maxZ) * 0.5) * 10) / 10 : startZ + iz * 20;
-        if (hasBaseCellAt(cx, cz)) {
+        const cz =
+          countZ === 1
+            ? alignStart(Math.round(((minZ + maxZ) * 0.5) * 10) / 10, "z")
+            : startZ + iz * 20;
+        const hasLow = hasLowMeshInCell(cx, cz);
+        if (hasLow && hasBaseCellAt(cx, cz)) {
           gridCells.push(new THREE.Vector3(cx, supportY, cz));
+        } else if (!hasLow) {
+          const notchY = findNotchRoofYInCell(cx, cz);
+          if (notchY != null) {
+            recessedReceptors.push(new THREE.Vector3(cx, notchY, cz));
+          }
+        }
+      }
+    }
+
+    // Escanea también celdas rebajadas fuera de baseBoxes (ej. mitad delantera y=8..16 en 11477, arcos y brackets)
+    const hasAnyNotchTris = [...notchTrisByDy.values()].some((arr) => arr.length > 0);
+    if (object3D && hasAnyNotchTris && localBox.max.y >= supportY + 11.5) {
+      const anchorX =
+        gridCells[0]?.x ??
+        (countX === 1 ? alignStart(Math.round(((minX + maxX) * 0.5) * 10) / 10, "x") : startX);
+      const anchorZ =
+        gridCells[0]?.z ??
+        (countZ === 1 ? alignStart(Math.round(((minZ + maxZ) * 0.5) * 10) / 10, "z") : startZ);
+      const kxMin = Math.floor((localBox.min.x + 14 - anchorX) / 20);
+      const kxMax = Math.ceil((localBox.max.x - 14 - anchorX) / 20);
+      const kzMin = Math.floor((localBox.min.z + 14 - anchorZ) / 20);
+      const kzMax = Math.ceil((localBox.max.z - 14 - anchorZ) / 20);
+      for (let kx = kxMin; kx <= kxMax; kx += 1) {
+        const cx = Math.round((anchorX + kx * 20) * 10) / 10;
+        for (let kz = kzMin; kz <= kzMax; kz += 1) {
+          const cz = Math.round((anchorZ + kz * 20) * 10) / 10;
+          if (
+            cx < localBox.min.x + 2 ||
+            cx > localBox.max.x - 2 ||
+            cz < localBox.min.z + 2 ||
+            cz > localBox.max.z - 2
+          ) {
+            continue;
+          }
+          const already =
+            gridCells.some((g) => Math.abs(g.x - cx) < 2 && Math.abs(g.z - cz) < 2) ||
+            recessedReceptors.some((r) => Math.abs(r.x - cx) < 2 && Math.abs(r.z - cz) < 2);
+          if (already) continue;
+          if (!hasLowMeshInCell(cx, cz)) {
+            const notchY = findNotchRoofYInCell(cx, cz);
+            if (notchY != null) {
+              recessedReceptors.push(new THREE.Vector3(cx, notchY, cz));
+            }
+          }
         }
       }
     }
@@ -767,7 +1025,7 @@ export class LDrawService {
     for (const s of upStuds) {
       const sx = Math.round(s.pos.x * 10) / 10;
       const sz = Math.round(s.pos.z * 10) / 10;
-      if (!hasBaseCellAt(sx, sz)) continue;
+      if (!hasBaseCellAt(sx, sz) || !hasLowMeshInCell(sx, sz)) continue;
       const key = `${sx}_${sz}`;
       if (seenKeys.has(key)) continue;
       seenKeys.add(key);
@@ -775,7 +1033,7 @@ export class LDrawService {
     }
 
     if (dedupStuds.length > 0 && dedupStuds.length >= gridCells.length) {
-      return dedupStuds;
+      return { bottomReceptors: dedupStuds, recessedReceptors };
     }
 
     if (gridCells.length) {
@@ -787,20 +1045,23 @@ export class LDrawService {
         );
         if (!exists) merged.push(s);
       }
-      return merged;
+      return { bottomReceptors: merged, recessedReceptors };
     }
 
     if (dedupStuds.length) {
-      return dedupStuds;
+      return { bottomReceptors: dedupStuds, recessedReceptors };
     }
 
-    return [
-      new THREE.Vector3(
-        (minX + maxX) * 0.5,
-        supportY,
-        (minZ + maxZ) * 0.5
-      ),
-    ];
+    return {
+      bottomReceptors: [
+        new THREE.Vector3(
+          (minX + maxX) * 0.5,
+          supportY,
+          (minZ + maxZ) * 0.5
+        ),
+      ],
+      recessedReceptors,
+    };
   }
 
   static makeGhostClone(group) {

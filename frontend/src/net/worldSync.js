@@ -13,14 +13,17 @@ function serializeQuat(q) {
 export function exportWorldSnapshot(bc) {
   return {
     nextInstanceSeq: bc.nextInstanceSeq,
+    customBoxCount: bc.customBoxCount ?? null,
     pendingPool: bc.pendingPool.map((it) => ({
       elementId: it.elementId,
       bagNumber: it.bagNumber || 1,
+      origBagNumber: it.origBagNumber ?? it.bagNumber ?? 1,
     })),
     placed: bc.placedPieces.map((p) => ({
       instanceId: p.instanceId,
       elementId: p.elementId,
       bagNumber: p.mesh.userData.bagNumber || 1,
+      origBagNumber: p.mesh.userData.origBagNumber ?? p.mesh.userData.bagNumber ?? 1,
       position: serializeVec3(p.mesh.position),
       rotation: serializeVec3(p.mesh.rotation),
       ...(Array.isArray(p.stickers) && p.stickers.length
@@ -31,6 +34,7 @@ export function exportWorldSnapshot(bc) {
       instanceId: it.instanceId,
       elementId: it.elementId,
       bagNumber: it.bagNumber || 1,
+      origBagNumber: it.origBagNumber ?? it.mesh?.userData?.origBagNumber ?? it.bagNumber ?? 1,
       position: serializeVec3(it.mesh.position),
       quaternion: serializeQuat(it.mesh.quaternion),
     })),
@@ -45,6 +49,7 @@ export async function loadWorldSnapshot(
 ) {
   bc.clearWorkspace(false);
   bc.manifest = manifest;
+  bc.customBoxCount = bc.normalizeCustomBoxCount(snapshot?.customBoxCount);
   const resolvedParts = (manifest.parts || []).filter(
     (p) => p.status !== "unresolved" && p.ldraw_part_id
   );
@@ -53,11 +58,8 @@ export async function loadWorldSnapshot(
     throw new Error(`El set supera el límite seguro de ${MAX_SUPPORTED_PIECES} piezas.`);
   }
 
-  bc.tableLayout = computeTableLayout(manifest);
-  bc.sceneManager.applyTableLayout(bc.tableLayout);
-  bc.pilePhysics.passiveMode = Boolean(passivePhysics);
-  bc.pilePhysics.setBagZones(bc.tableLayout.bagZones);
   bc.partsByElementId.clear();
+  bc._partOrderMap?.clear();
   bc.failedElementIds.clear();
   bc.pendingPool = Array.isArray(snapshot?.pendingPool)
     ? snapshot.pendingPool.map((it) => ({ ...it }))
@@ -65,12 +67,27 @@ export async function loadWorldSnapshot(
   bc.isLightweightSet = totalCount >= LIGHTWEIGHT_RENDER_THRESHOLD;
   bc.nextInstanceSeq = Number(snapshot?.nextInstanceSeq) || 1;
 
-  for (const part of resolvedParts) {
+  resolvedParts.forEach((part, idx) => {
     bc.partsByElementId.set(part.element_id, part);
-  }
+    bc._partOrderMap?.set(part.element_id, idx);
+  });
 
   const placedList = Array.isArray(snapshot?.placed) ? snapshot.placed : [];
   const pileList = Array.isArray(snapshot?.pile) ? snapshot.pile : [];
+  if (bc.customBoxCount != null) {
+    bc.effectiveManifest = bc._buildBalancedEffectiveManifest(
+      manifest,
+      bc.customBoxCount,
+      [...pileList, ...bc.pendingPool]
+    );
+  } else {
+    bc.effectiveManifest = manifest;
+  }
+
+  bc.tableLayout = computeTableLayout(bc.effectiveManifest);
+  bc.sceneManager.applyTableLayout(bc.tableLayout);
+  bc.pilePhysics.passiveMode = Boolean(passivePhysics);
+  bc.pilePhysics.setBagZones(bc.tableLayout.bagZones);
   const grandTotal = placedList.length + pileList.length;
   let loadedCount = 0;
 
@@ -129,9 +146,11 @@ export async function loadWorldSnapshot(
             proxyOnly: true,
           });
           const bagNum = item.bagNumber || bc._getDefaultBagForElement(item.elementId);
+          const origBag = item.origBagNumber ?? bagNum;
           group.userData.instanceId = item.instanceId;
           group.userData.elementId = item.elementId;
           group.userData.bagNumber = bagNum;
+          group.userData.origBagNumber = origBag;
           group.position.set(item.position.x, item.position.y, item.position.z);
           if (item.quaternion) {
             group.quaternion.set(
@@ -148,7 +167,8 @@ export async function loadWorldSnapshot(
             localBox,
             item.position,
             true,
-            bagNum
+            bagNum,
+            origBag
           );
           const addedEntry = bc.pilePhysics.items[bc.pilePhysics.items.length - 1];
           if (addedEntry && item.quaternion) {

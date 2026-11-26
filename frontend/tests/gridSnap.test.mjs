@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import * as THREE from "three";
 import { BuildController } from "../src/builder/buildController.js";
+import { LDrawService } from "../src/core/ldrawService.js";
+import { computePaginationWindow } from "../src/ui/lobbyView.js";
 import {
   computeSnappedPlacementY,
   computeStudCoordParityOffset,
@@ -327,4 +329,649 @@ test("Modo fantasmal congela la pieza mientras se orbita/mueve la cámara manten
   bc._draggedCarryFromPress = true;
   bc.handlePointerMove(220, 160, 1);
   assert.equal(raycastCalls, 2);
+});
+
+test("recessedReceptors y _findBestTargetReceptor conectan piezas con stud notch en ambos sentidos", () => {
+  const cam = new THREE.PerspectiveCamera();
+  cam.position.set(120, 180, 120);
+  cam.updateMatrixWorld(true);
+  const bc = new BuildController(
+    { camera: cam, controls: { enablePan: true, enableRotate: true }, onFrame() {} },
+    {}
+  );
+
+  // Plate 2x2 Corner simulada en [20, 8, 0] rotY=90 -> studs en (0,8,0), (20,8,0), (20,8,-20)
+  const plateMesh = new THREE.Group();
+  plateMesh.position.set(20, 8, 0);
+  plateMesh.updateMatrixWorld(true);
+  const plateBox = new THREE.Box3(new THREE.Vector3(-30, -8, -30), new THREE.Vector3(10, 4, 10));
+  plateMesh.userData = {
+    collisionBoxes: [
+      new THREE.Box3(new THREE.Vector3(-30, -8, -10), new THREE.Vector3(10, 0, 10)),
+      new THREE.Box3(new THREE.Vector3(-10, -8, -30), new THREE.Vector3(10, 0, -10)),
+    ],
+    topStuds: [
+      { pos: new THREE.Vector3(-20, 0, 0), up: new THREE.Vector3(0, 1, 0), height: 4 },
+      { pos: new THREE.Vector3(0, 0, 0), up: new THREE.Vector3(0, 1, 0), height: 4 },
+      { pos: new THREE.Vector3(0, 0, -20), up: new THREE.Vector3(0, 1, 0), height: 4 },
+    ],
+    bottomReceptors: [new THREE.Vector3(0, -8, 0)],
+    recessedReceptors: [],
+    worldBox: plateBox.clone(),
+  };
+
+  // Bracket bloqueando studs (0,8,0) y (20,8,0) entre y=8..16 (solo queda libre stud (20,8,-20))
+  const bracketMesh = new THREE.Group();
+  bracketMesh.position.set(10, 16, 0);
+  bracketMesh.updateMatrixWorld(true);
+  const bracketBox = new THREE.Box3(new THREE.Vector3(-10, 8, -10), new THREE.Vector3(30, 16, 10));
+  bracketMesh.userData = {
+    collisionBoxes: [new THREE.Box3(new THREE.Vector3(-20, -8, -10), new THREE.Vector3(20, 0, 10))],
+    topStuds: [],
+    bottomReceptors: [],
+    recessedReceptors: [],
+    worldBox: bracketBox.clone(),
+  };
+
+  bc.placedPieces = [
+    { instanceId: "p24", mesh: plateMesh, localBox: plateBox, worldBox: plateBox },
+    { instanceId: "p99", mesh: bracketMesh, localBox: bracketBox, worldBox: bracketBox },
+  ];
+
+  // Caso 1: llevar 5095 (recessedReceptor en (-10, 8, -10)) con rotY=180 sobre stud (20, 8, -20)
+  const wedgeMesh = new THREE.Group();
+  wedgeMesh.userData = {
+    collisionBoxes: [
+      new THREE.Box3(new THREE.Vector3(-20, 0, 0), new THREE.Vector3(20, 16, 18)),
+      new THREE.Box3(new THREE.Vector3(0, 0, -20), new THREE.Vector3(20, 16, 0)),
+      new THREE.Box3(new THREE.Vector3(-20, 8, -20), new THREE.Vector3(0, 16, 0)),
+    ],
+    topStuds: [],
+    bottomReceptors: [new THREE.Vector3(-10, 0, 10), new THREE.Vector3(10, 0, -10)],
+    recessedReceptors: [new THREE.Vector3(-10, 8, -10)],
+    defaultSupportUndersideY: 0,
+    recessedSupportUndersideY: null,
+  };
+  const ghost = new THREE.Group();
+  bc.carry = {
+    source: "pile",
+    elementId: "5095",
+    mesh: wedgeMesh,
+    ghost,
+    localBox: new THREE.Box3(new THREE.Vector3(-20, 0, -20), new THREE.Vector3(20, 16, 18)),
+    ghostBox: new THREE.Box3(new THREE.Vector3(-20, 0, -18), new THREE.Vector3(20, 16, 20)),
+    spinAngle: Math.PI,
+    quaternion: new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI),
+    surfaceNormal: new THREE.Vector3(0, 1, 0),
+    manualTiltApplied: false,
+    activeMechKind: null,
+    manualOffsetX: 0,
+    manualOffsetY: 0,
+    manualOffsetZ: 0,
+    parityOffsetX: 0,
+    parityOffsetZ: 0,
+    isColliding: false,
+  };
+  bc._lastHit = {
+    kind: "placed",
+    point: new THREE.Vector3(20, 8, -20),
+    normal: new THREE.Vector3(0, 1, 0),
+    object: plateMesh,
+  };
+  bc._updateCarryTransform();
+  assert.equal(bc.carry.isColliding, false);
+  assert.deepEqual(
+    ghost.position.toArray().map((n) => Math.round(n)),
+    [10, 0, -30],
+    "5095 debe encastrar al ras en y=0 usando su stud notch (-10,8,-10)"
+  );
+
+  // Caso 2: inverso - 5095 colocada y llevamos 2420 apuntando al hueco del stud notch
+  wedgeMesh.position.set(0, 0, 0);
+  wedgeMesh.quaternion.set(0, 0, 0, 1);
+  wedgeMesh.updateMatrixWorld(true);
+  const wedgeBox = new THREE.Box3(new THREE.Vector3(-20, 0, -20), new THREE.Vector3(20, 16, 18));
+  wedgeMesh.userData.worldBox = wedgeBox;
+  bc.placedPieces = [{ instanceId: "w5095", mesh: wedgeMesh, localBox: wedgeBox, worldBox: wedgeBox }];
+
+  const carryPlate = plateMesh.clone(true);
+  carryPlate.position.set(0, 0, 0);
+  carryPlate.userData = { ...plateMesh.userData };
+  const ghostPlate = new THREE.Group();
+  bc.carry = {
+    source: "pile",
+    elementId: "2420",
+    mesh: carryPlate,
+    ghost: ghostPlate,
+    localBox: new THREE.Box3(new THREE.Vector3(-30, -8, -30), new THREE.Vector3(10, 4, 10)),
+    ghostBox: new THREE.Box3(new THREE.Vector3(-30, -8, -30), new THREE.Vector3(10, 4, 10)),
+    spinAngle: 0,
+    quaternion: new THREE.Quaternion(),
+    surfaceNormal: new THREE.Vector3(0, 1, 0),
+    manualTiltApplied: false,
+    activeMechKind: null,
+    manualOffsetX: 0,
+    manualOffsetY: 0,
+    manualOffsetZ: 0,
+    parityOffsetX: 0,
+    parityOffsetZ: 0,
+    isColliding: false,
+  };
+  bc._lastHit = {
+    kind: "placed",
+    point: new THREE.Vector3(-10, 6, -10),
+    normal: new THREE.Vector3(-1, 0, 0),
+    object: wedgeMesh,
+  };
+  bc._updateCarryTransform();
+  assert.equal(bc.carry.isColliding, false);
+  assert.equal(Math.round(ghostPlate.position.y), 8, "2420 debe encastrar sus studs hacia +Y dentro del stud notch de 5095");
+});
+
+test("extractBottomReceptors centra piezas curvas 1x1 (tipo 24246) exactamente en (0, y, 0)", () => {
+  const boxes = [
+    new THREE.Box3(new THREE.Vector3(-10, -8, -10), new THREE.Vector3(10, 0, -6)),
+    new THREE.Box3(new THREE.Vector3(-10, -8, -6), new THREE.Vector3(-6, 0, 6)),
+    new THREE.Box3(new THREE.Vector3(6, -8, -6), new THREE.Vector3(10, 0, 6)),
+    new THREE.Box3(new THREE.Vector3(-4, -8, 4), new THREE.Vector3(4, 0, 10)),
+  ];
+  const localBox = new THREE.Box3(new THREE.Vector3(-10, -8, -10), new THREE.Vector3(10, 0, 10));
+  const { bottomReceptors } = LDrawService.extractBottomReceptors(boxes, localBox, -8, []);
+  assert.equal(bottomReceptors.length, 1);
+  assert.deepEqual(
+    bottomReceptors[0].toArray().map((n) => Math.round(n * 10) / 10),
+    [0, -8, 0]
+  );
+});
+
+test("3386 y 11477 conectan completamente en ambos sentidos sin dejar holgura de 4 LDU", () => {
+  const cam = new THREE.PerspectiveCamera();
+  cam.position.set(-120, 80, -120);
+  cam.updateMatrixWorld(true);
+  const bc = new BuildController(
+    { camera: cam, controls: { enablePan: true, enableRotate: true }, onFrame() {} },
+    {}
+  );
+
+  // 11477 colocada de costado con su arco rebajado (0, 8, -10) mirando hacia +Z en (0, 38, -12)
+  const bowMesh = new THREE.Group();
+  bowMesh.position.set(0, 28, -4);
+  const qBow = new THREE.Quaternion()
+    .setFromAxisAngle(new THREE.Vector3(0, 0, -1), Math.PI)
+    .multiply(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, -1)))
+    .normalize();
+  bowMesh.quaternion.copy(qBow);
+  bowMesh.updateMatrixWorld(true);
+  const bowLocalBox = new THREE.Box3(new THREE.Vector3(-10, 0, -20), new THREE.Vector3(10, 16, 20));
+  const bowWorldBox = bowLocalBox.clone().applyMatrix4(bowMesh.matrixWorld);
+  bowMesh.userData = {
+    collisionBoxes: [
+      new THREE.Box3(new THREE.Vector3(-10, 0, 0), new THREE.Vector3(10, 16, 20)),
+      new THREE.Box3(new THREE.Vector3(-10, 8, -20), new THREE.Vector3(10, 16, 0)),
+    ],
+    topStuds: [],
+    bottomReceptors: [new THREE.Vector3(0, 0, 10)],
+    recessedReceptors: [new THREE.Vector3(0, 8, -10)],
+    worldBox: bowWorldBox,
+  };
+  bc.placedPieces = [{ instanceId: "b11477", mesh: bowMesh, localBox: bowLocalBox, worldBox: bowWorldBox }];
+
+  // Llevando 3386 (con stud lateral en (0, -6, 10) hacia +Z): debe mantenerse vertical y encastrar en (0, 44, -2)
+  const modMesh = new THREE.Group();
+  modMesh.userData = {
+    collisionBoxes: [new THREE.Box3(new THREE.Vector3(-10, -16, -10), new THREE.Vector3(10, 0, 10))],
+    topStuds: [
+      { pos: new THREE.Vector3(0, 0, 0), up: new THREE.Vector3(0, 1, 0), height: 4 },
+      { pos: new THREE.Vector3(0, -6, 10), up: new THREE.Vector3(0, 0, 1), height: 4 },
+    ],
+    bottomReceptors: [new THREE.Vector3(0, -16, 0)],
+    recessedReceptors: [],
+    defaultSupportUndersideY: -16,
+    recessedSupportUndersideY: null,
+  };
+  const ghostMod = new THREE.Group();
+  bc.carry = {
+    source: "pile",
+    elementId: "3386",
+    mesh: modMesh,
+    ghost: ghostMod,
+    localBox: new THREE.Box3(new THREE.Vector3(-10, -16, -10), new THREE.Vector3(10, 4, 14)),
+    ghostBox: new THREE.Box3(new THREE.Vector3(-10, -16, -10), new THREE.Vector3(10, 4, 14)),
+    spinAngle: 0,
+    quaternion: new THREE.Quaternion(),
+    surfaceNormal: new THREE.Vector3(0, 1, 0),
+    manualTiltApplied: false,
+    activeMechKind: null,
+    manualOffsetX: 0,
+    manualOffsetY: 0,
+    manualOffsetZ: 0,
+    parityOffsetX: 0,
+    parityOffsetZ: 0,
+    isColliding: false,
+  };
+  bc._lastHit = {
+    kind: "placed",
+    point: new THREE.Vector3(0, 38, -12),
+    normal: new THREE.Vector3(0, 0, 1),
+    object: bowMesh,
+  };
+  bc._updateCarryTransform();
+  assert.equal(bc.carry.isColliding, false);
+  assert.deepEqual(
+    ghostMod.position.toArray().map((n) => Math.round(n) || 0),
+    [0, 44, -2],
+    "3386 debe conservar verticalidad y meter su stud lateral hasta z=-12 dentro de 11477"
+  );
+});
+
+test("Raycast por dentro de stud hueco (11211) o borde cilíndrico no empuja 24246 hacia atrás", () => {
+  const cam = new THREE.PerspectiveCamera();
+  cam.position.set(-50, 150, 200);
+  const bc = new BuildController(
+    { camera: cam, onFrame() {} },
+    { isPointInAnyBag: () => false }
+  );
+  bc.collisionEnabled = true;
+
+  // Simulamos 11211 (1x2 con 2 studs huecos al frente en z=10) en (0, 24, 0)
+  const brickMesh = new THREE.Group();
+  brickMesh.position.set(0, 24, 0);
+  brickMesh.userData = {
+    collisionBoxes: [new THREE.Box3(new THREE.Vector3(-20, -24, -10), new THREE.Vector3(20, 0, 10))],
+    topStuds: [
+      { pos: new THREE.Vector3(-10, -10, 10), up: new THREE.Vector3(0, 0, 1), height: 4 },
+      { pos: new THREE.Vector3(10, -10, 10), up: new THREE.Vector3(0, 0, 1), height: 4 },
+      { pos: new THREE.Vector3(-10, 0, 0), up: new THREE.Vector3(0, 1, 0), height: 4 },
+      { pos: new THREE.Vector3(10, 0, 0), up: new THREE.Vector3(0, 1, 0), height: 4 },
+    ],
+    bottomReceptors: [new THREE.Vector3(-10, -24, 0), new THREE.Vector3(10, -24, 0)],
+    recessedReceptors: [],
+    defaultSupportUndersideY: -24,
+    recessedSupportUndersideY: null,
+  };
+  brickMesh.updateMatrixWorld(true);
+  bc.placedPieces = [
+    {
+      instanceId: "b11211",
+      mesh: brickMesh,
+      localBox: new THREE.Box3(new THREE.Vector3(-20, -24, -10), new THREE.Vector3(20, 4, 14)),
+      worldBox: new THREE.Box3(new THREE.Vector3(-20, 0, -10), new THREE.Vector3(20, 24, 10)),
+    },
+  ];
+
+  // Simulamos Tile 1x1 Half Circle (24246) con caja real [-10..10, -8..0, -10..10]
+  const tileBox = new THREE.Box3(new THREE.Vector3(-10, -8, -10), new THREE.Vector3(10, 0, 10));
+  const tileMesh = new THREE.Mesh(
+    new THREE.BoxGeometry(20, 8, 20),
+    new THREE.MeshBasicMaterial()
+  );
+  tileMesh.geometry.translate(0, -4, 0);
+  tileMesh.userData = {
+    collisionBoxes: [tileBox.clone()],
+    topStuds: [],
+    bottomReceptors: [new THREE.Vector3(0, -8, 0)],
+    recessedReceptors: [],
+    defaultSupportUndersideY: -8,
+    recessedSupportUndersideY: null,
+  };
+  const ghostTile = tileMesh.clone();
+  bc.carry = {
+    source: "pile",
+    elementId: "24246",
+    mesh: tileMesh,
+    ghost: ghostTile,
+    localBox: tileBox.clone(),
+    ghostBox: tileBox.clone(),
+    spinAngle: 0,
+    quaternion: new THREE.Quaternion(),
+    surfaceNormal: new THREE.Vector3(0, 1, 0),
+    manualTiltApplied: false,
+    activeMechKind: null,
+    manualOffsetX: 0,
+    manualOffsetY: 0,
+    manualOffsetZ: 0,
+    parityOffsetX: 0,
+    parityOffsetZ: 0,
+    isColliding: false,
+  };
+
+  // 1. Rayo entra por el centro del stud hueco (-10, 14, 12) e impacta pared interna trasera en z=-6
+  bc._lastHit = {
+    kind: "placed",
+    object: brickMesh,
+    point: new THREE.Vector3(-7.7, 2.5, -6),
+    normal: new THREE.Vector3(0, 0, 1),
+  };
+  bc._updateCarryTransform();
+  assert.equal(bc.carry.isColliding, false);
+  assert.deepEqual(
+    ghostTile.position.toArray().map((n) => Math.round(n) || 0),
+    [-10, 14, 18],
+    "Rayo a través del stud hueco debe encastrar al frente en (-10, 14, 18) y no irse atrás"
+  );
+
+  // 2. Rayo roza el borde cilíndrico superior del stud horizontal (-11.5, 19.7, 12.4)
+  bc.carry.lastValid = null;
+  bc._lastHit = {
+    kind: "placed",
+    object: brickMesh,
+    point: new THREE.Vector3(-11.5, 19.7, 12.4),
+    normal: new THREE.Vector3(-0.2, 0.98, 0),
+  };
+  bc._updateCarryTransform();
+  assert.equal(bc.carry.isColliding, false);
+  assert.deepEqual(
+    ghostTile.position.toArray().map((n) => Math.round(n) || 0),
+    [-10, 14, 18],
+    "Roce sobre cilindro del stud lateral debe mantenerse en (-10, 14, 18)"
+  );
+});
+
+test("Cursor en pared vertical alta o mesa junto a pared no dispara saltos bruscos hacia el techo", () => {
+  const cam = new THREE.PerspectiveCamera();
+  cam.position.set(-50, 140, 220);
+  const bc = new BuildController(
+    { camera: cam, onFrame() {} },
+    { isPointInAnyBag: () => false }
+  );
+  bc.collisionEnabled = true;
+
+  // Bloque frontal alto (0..48 LDU)
+  const wallBox = new THREE.Box3(new THREE.Vector3(-20, -48, -10), new THREE.Vector3(20, 0, 10));
+  const wallMesh = new THREE.Group();
+  wallMesh.position.set(0, 48, 0);
+  wallMesh.userData = {
+    collisionBoxes: [wallBox],
+    topStuds: [],
+    bottomReceptors: [new THREE.Vector3(0, -48, 0)],
+    recessedReceptors: [],
+    defaultSupportUndersideY: -48,
+    recessedSupportUndersideY: null,
+  };
+  wallMesh.updateMatrixWorld(true);
+  bc.placedPieces = [
+    {
+      instanceId: "wall",
+      mesh: wallMesh,
+      localBox: wallBox,
+      worldBox: new THREE.Box3(new THREE.Vector3(-20, 0, -10), new THREE.Vector3(20, 48, 10)),
+    },
+  ];
+
+  const carriedBox = new THREE.Box3(new THREE.Vector3(-10, -8, -30), new THREE.Vector3(10, 0, 10));
+  const carriedMesh = new THREE.Mesh(new THREE.BoxGeometry(20, 8, 40), new THREE.MeshBasicMaterial());
+  carriedMesh.geometry.translate(0, -4, -10);
+  carriedMesh.userData = {
+    collisionBoxes: [carriedBox.clone()],
+    topStuds: [],
+    bottomReceptors: [new THREE.Vector3(0, -8, -10)],
+    recessedReceptors: [],
+    defaultSupportUndersideY: -8,
+    recessedSupportUndersideY: null,
+  };
+  const ghost = carriedMesh.clone();
+  bc.carry = {
+    source: "pile",
+    elementId: "long_plate",
+    mesh: carriedMesh,
+    ghost,
+    localBox: carriedBox.clone(),
+    ghostBox: carriedBox.clone(),
+    spinAngle: 0,
+    quaternion: new THREE.Quaternion(),
+    surfaceNormal: new THREE.Vector3(0, 1, 0),
+    manualTiltApplied: false,
+    activeMechKind: null,
+    manualOffsetX: 0,
+    manualOffsetY: 0,
+    manualOffsetZ: 0,
+    parityOffsetX: 0,
+    parityOffsetZ: 0,
+    isColliding: false,
+  };
+
+  // 1. Apuntar parte alta de la pared frontal (y=36) apoya contra la pared cerca del cursor, sin caer al piso (y=8)
+  bc._lastHit = {
+    kind: "placed",
+    object: wallMesh,
+    point: new THREE.Vector3(0, 36, 10),
+    normal: new THREE.Vector3(0, 0, 1),
+  };
+  bc._updateCarryTransform();
+  assert.ok(ghost.position.y >= 24 && ghost.position.y <= 48, `Esperado cerca de y=36, obtuvo ${ghost.position.y}`);
+
+  // 2. Apuntar en la mesa colisionando contra una pared de 24 LDU no permite encajarla encima del techo (y=32)
+  wallMesh.position.set(0, 24, 0);
+  bc.placedPieces[0].worldBox = new THREE.Box3(new THREE.Vector3(-20, 0, -10), new THREE.Vector3(20, 24, 10));
+  bc.carry.lastValid = null;
+  bc._lastHit = {
+    kind: "table",
+    object: null,
+    point: new THREE.Vector3(0, 0, 20),
+    normal: new THREE.Vector3(0, 1, 0),
+  };
+  bc._updateCarryTransform();
+  assert.equal(bc.carry.isColliding, true, "Desde la mesa no debe auto-encastrar arriba de una pared de 24 LDU");
+});
+
+test("Peluca ancha con un único antiStud encastra en stud de cabeza minifig incluso al apuntar bordes o cara", () => {
+  const bc = new BuildController(
+    {
+      camera: { position: new THREE.Vector3(60, 120, 160) },
+      controls: { enablePan: true, enableRotate: true },
+      onFrame() {},
+    },
+    {}
+  );
+  bc.pilePhysics = { isPointInAnyBag: () => false };
+
+  const headBox = new THREE.Box3(new THREE.Vector3(-13, -24, -13), new THREE.Vector3(13, 4, 13));
+  const headMesh = new THREE.Mesh(new THREE.BoxGeometry(26, 28, 26), new THREE.MeshBasicMaterial());
+  headMesh.position.set(0, 24, 0);
+  headMesh.userData = {
+    collisionBoxes: [new THREE.Box3(new THREE.Vector3(-13, -24, -13), new THREE.Vector3(13, 0, 13))],
+    topStuds: [{ pos: new THREE.Vector3(0, 0, 0), up: new THREE.Vector3(0, 1, 0), height: 4 }],
+    connectors: [{ kind: "minifig_neck", role: "socket", pos: new THREE.Vector3(0, -24, 0) }],
+    bottomReceptors: [new THREE.Vector3(0, -24, 0)],
+    recessedReceptors: [],
+    defaultSupportUndersideY: -24,
+    recessedSupportUndersideY: null,
+  };
+  headMesh.updateMatrixWorld(true);
+  bc.placedPieces = [
+    {
+      instanceId: "head",
+      mesh: headMesh,
+      localBox: headBox,
+      worldBox: new THREE.Box3(new THREE.Vector3(-13, 0, -13), new THREE.Vector3(13, 28, 13)),
+    },
+  ];
+
+  // Peluca ancha (> 22 LDU) cuyo único receptor inferior está en (0, 0, 0)
+  const wigBox = new THREE.Box3(new THREE.Vector3(-21, -23, -25), new THREE.Vector3(21, 9, 9));
+  const wigMesh = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), new THREE.MeshBasicMaterial());
+  wigMesh.userData = {
+    collisionBoxes: [new THREE.Box3(new THREE.Vector3(-4, 2, -4), new THREE.Vector3(4, 9, 4))],
+    topStuds: [],
+    antiStuds: [{ pos: new THREE.Vector3(0, 0, 0), dir: new THREE.Vector3(0, -1, 0) }],
+    bottomReceptors: [new THREE.Vector3(0, 0, 0)],
+    recessedReceptors: [],
+    defaultSupportUndersideY: 0,
+    recessedSupportUndersideY: null,
+  };
+  const ghost = wigMesh.clone();
+  bc.carry = {
+    source: "pile",
+    elementId: "wig_21269",
+    mesh: wigMesh,
+    ghost,
+    localBox: wigBox.clone(),
+    ghostBox: wigBox.clone(),
+    spinAngle: 0,
+    quaternion: new THREE.Quaternion(),
+    surfaceNormal: new THREE.Vector3(0, 1, 0),
+    manualTiltApplied: false,
+    activeMechKind: null,
+    manualOffsetX: 0,
+    manualOffsetY: 0,
+    manualOffsetZ: 0,
+    parityOffsetX: 0,
+    parityOffsetZ: 0,
+    isColliding: false,
+  };
+
+  // Borde superior curvo (x=-10.6) y costado inclinado (z=10.8): ambos deben centrar en (0, 24, 0)
+  for (const [point, normal] of [
+    [new THREE.Vector3(-10.6, 23.2, -1.4), new THREE.Vector3(-0.47, 0.88, -0.09)],
+    [new THREE.Vector3(-5.3, 22.1, 10.8), new THREE.Vector3(-0.43, 0.63, 0.64)],
+  ]) {
+    bc.carry.lastValid = null;
+    bc._lastHit = { kind: "placed", object: headMesh, point, normal };
+    bc._updateCarryTransform();
+    assert.equal(bc.carry.isColliding, false);
+    assert.ok(ghost.position.distanceTo(new THREE.Vector3(0, 24, 0)) < 0.05, `Esperado (0,24,0), obtuvo ${ghost.position.toArray()}`);
+  }
+});
+
+test("setCustomBoxCount reparte piezas equitativamente entre K cajas y restaura las bolsas por defecto", () => {
+  const layouts = [];
+  const bc = new BuildController(
+    {
+      camera: { position: new THREE.Vector3(0, 120, 220) },
+      controls: { enablePan: true, enableRotate: true },
+      onFrame() {},
+      applyTableLayout(layout) { layouts.push(layout); },
+      syncPileTransform() {},
+      setSelectionBox() {},
+    },
+    {}
+  );
+
+  bc.manifest = {
+    set_number: "test",
+    bags: [
+      { bag_number: 1, label: "Bolsa 1", piece_count: 2 },
+      { bag_number: 2, label: "Bolsa 2", piece_count: 8 },
+    ],
+    parts: [
+      { element_id: "a", quantity: 2, bag_counts: { "1": 2 } },
+      { element_id: "b", quantity: 8, bag_counts: { "2": 8 } },
+    ],
+  };
+  bc.effectiveManifest = bc.manifest;
+  bc.partsByElementId.set("a", bc.manifest.parts[0]);
+  bc.partsByElementId.set("b", bc.manifest.parts[1]);
+  bc._partOrderMap.set("a", 0);
+  bc._partOrderMap.set("b", 1);
+
+  const box = new THREE.Box3(new THREE.Vector3(-10, -8, -10), new THREE.Vector3(10, 0, 10));
+  for (let i = 0; i < 10; i += 1) {
+    const eid = i < 2 ? "a" : "b";
+    const origBag = i < 2 ? 1 : 2;
+    const m = new THREE.Mesh(new THREE.BoxGeometry(20, 8, 20), new THREE.MeshBasicMaterial());
+    m.userData = { bagNumber: origBag, origBagNumber: origBag };
+    bc.pilePhysics.addPiece(`pile_${i}`, eid, m, box, { x: -200, y: 20, z: 0 }, false, origBag, origBag);
+  }
+
+  // Dividir en 4 cajas balanceadas: 10 / 4 -> [3, 3, 2, 2]
+  assert.equal(bc.setCustomBoxCount(4), true);
+  assert.equal(bc.getEffectiveBoxCount(), 4);
+  assert.equal(bc.tableLayout.bagZones.length, 4);
+  const counts4 = bc.getEffectiveManifest().bags.map((b) => b.piece_count);
+  assert.deepEqual(counts4, [3, 3, 2, 2]);
+  assert.equal(bc.exportWorldSnapshot().customBoxCount, 4);
+
+  // Restaurar por defecto: vuelve a las 2 bolsas originales (2 y 8)
+  assert.equal(bc.setCustomBoxCount(null), true);
+  assert.equal(bc.customBoxCount, null);
+  assert.equal(bc.getEffectiveBoxCount(), 2);
+  assert.equal(bc.tableLayout.bagZones.length, 2);
+  const origCounts = bc.pilePhysics.items.reduce(
+    (acc, it) => {
+      acc[it.bagNumber] = (acc[it.bagNumber] || 0) + 1;
+      return acc;
+    },
+    {}
+  );
+  assert.deepEqual(origCounts, { 1: 2, 2: 8 });
+  assert.equal(bc.exportWorldSnapshot().customBoxCount, null);
+});
+
+test("_buildGroupCompositeData propaga antiStuds y todos los conectores transformados", () => {
+  const bc = new BuildController({ camera: new THREE.PerspectiveCamera(), onFrame() {} }, {});
+  const box = new THREE.Box3(new THREE.Vector3(-10, -8, -10), new THREE.Vector3(10, 0, 10));
+
+  const meshA = new THREE.Group();
+  meshA.position.set(10, 8, 0);
+  meshA.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2);
+  meshA.userData = {
+    collisionBoxes: [box.clone()],
+    topStuds: [],
+    antiStuds: [{ pos: new THREE.Vector3(0, -4, 0), dir: new THREE.Vector3(0, -1, 0) }],
+    bottomReceptors: [new THREE.Vector3(0, -8, 0)],
+    recessedReceptors: [],
+    pinHoles: [],
+    pinConnectors: [],
+    pinBarrels: [],
+    connectors: [
+      {
+        kind: "bar",
+        role: "plug",
+        pos: new THREE.Vector3(6, 0, 0),
+        barMidPos: new THREE.Vector3(10, 0, 0),
+        dir: new THREE.Vector3(1, 0, 0),
+      },
+    ],
+  };
+
+  const meshB = new THREE.Group();
+  meshB.position.set(30, 8, 0);
+  meshB.userData = {
+    collisionBoxes: [box.clone()],
+    topStuds: [],
+    antiStuds: [{ pos: new THREE.Vector3(0, -4, 0), dir: new THREE.Vector3(0, -1, 0) }],
+    bottomReceptors: [new THREE.Vector3(0, -8, 0)],
+    recessedReceptors: [],
+    pinHoles: [],
+    pinConnectors: [],
+    pinBarrels: [],
+    connectors: [],
+  };
+
+  const wbA = new THREE.Box3(new THREE.Vector3(0, 0, -10), new THREE.Vector3(20, 8, 10));
+  const wbB = new THREE.Box3(new THREE.Vector3(20, 0, -10), new THREE.Vector3(40, 8, 10));
+  const comp = bc._buildGroupCompositeData([
+    { mesh: meshA, localBox: box.clone(), worldBox: wbA },
+    { mesh: meshB, localBox: box.clone(), worldBox: wbB },
+  ]);
+  assert.equal(comp.compositeAntiStuds.length, 2, "Debe heredar antiStuds de todas las piezas del grupo");
+  assert.ok(comp.compositeAntiStuds[1].pos.distanceTo(new THREE.Vector3(20, -4, 0)) < 1e-4);
+  assert.equal(comp.compositeConnectors.length, 1);
+  assert.ok(comp.compositeConnectors[0].barMidPos.distanceTo(new THREE.Vector3(0, 0, -10)) < 1e-4);
+});
+
+test("computePaginationWindow pagina en bloques de 60 y desliza ventana de 6 usando el extremo superior", () => {
+  // Menos de 60 sets -> página 1 única centrada sin flechas
+  const single = computePaginationWindow(1, 37);
+  assert.equal(single.totalPages, 1);
+  assert.deepEqual(single.pages, [1]);
+  assert.equal(single.showArrows, false);
+  assert.equal(single.startIndex, 0);
+  assert.equal(single.endIndex, 37);
+
+  // 167 sets -> 3 páginas (60, 60, 47) con flechas
+  const p3 = computePaginationWindow(3, 167);
+  assert.equal(p3.totalPages, 3);
+  assert.deepEqual(p3.pages, [1, 2, 3]);
+  assert.equal(p3.showArrows, true);
+  assert.equal(p3.endIndex - p3.startIndex, 47);
+
+  // Catálogo grande (>= 10 páginas): página 3 -> [1..6], página 8 -> [3..8]
+  const win3 = computePaginationWindow(3, 600);
+  assert.deepEqual(win3.pages, [1, 2, 3, 4, 5, 6]);
+  assert.equal(win3.currentPage, 3);
+
+  const win8 = computePaginationWindow(8, 600);
+  assert.deepEqual(win8.pages, [3, 4, 5, 6, 7, 8]);
+  assert.equal(win8.currentPage, 8);
 });

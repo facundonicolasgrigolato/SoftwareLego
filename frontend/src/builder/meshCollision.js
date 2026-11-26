@@ -9,6 +9,10 @@ const _scratchMatB = new THREE.Matrix4();
 const _scratchMatBtoA = new THREE.Matrix4();
 const _scratchMatAtoB = new THREE.Matrix4();
 const _scratchVec = new THREE.Vector3();
+const _scratchStudPos = new THREE.Vector3();
+const _scratchStudUp = new THREE.Vector3();
+const _scratchAntiPos = new THREE.Vector3();
+const _scratchAntiDir = new THREE.Vector3();
 const _unitScale = new THREE.Vector3(1, 1, 1);
 
 function countRayHitsAxis(px, py, pz, node, axis, dirSign = 1) {
@@ -141,15 +145,20 @@ function compressPinRetentionLip(pt, pinBarrels, tmpDiff) {
   for (let i = 0; i < pinBarrels.length; i += 1) {
     const b = pinBarrels[i];
     tmpDiff.subVectors(pt, b.pos);
-    const proj = tmpDiff.dot(b.dir);
+    let proj = tmpDiff.dot(b.dir);
     if (proj < b.minProj || proj > b.maxProj) continue;
+    const minR = b.minR ?? 5.9;
+    const maxR = b.maxR ?? 6.65;
+    const targetR = b.targetR ?? minR;
     const radSq = tmpDiff.lengthSq() - proj * proj;
-    if (radSq <= 5.9 * 5.9 || radSq > 6.65 * 6.65) continue;
-    const r = Math.sqrt(radSq);
-    const scale = 5.9 / r;
+    const radialClip = radSq > minR * minR && radSq <= maxR * maxR;
+    const capClip = b.capProj != null && proj > b.capProj && radSq <= maxR * maxR;
+    if (!radialClip && !capClip) continue;
     const perpX = tmpDiff.x - b.dir.x * proj;
     const perpY = tmpDiff.y - b.dir.y * proj;
     const perpZ = tmpDiff.z - b.dir.z * proj;
+    const scale = radialClip ? targetR / Math.sqrt(radSq) : 1;
+    if (capClip) proj = b.capProj;
     pt.x = b.pos.x + b.dir.x * proj + perpX * scale;
     pt.y = b.pos.y + b.dir.y * proj + perpY * scale;
     pt.z = b.pos.z + b.dir.z * proj + perpZ * scale;
@@ -165,7 +174,8 @@ export function buildCollisionMeshData(
   wrapper,
   topStuds = [],
   collisionBoxes = [],
-  pinBarrels = []
+  pinBarrels = [],
+  meta = {}
 ) {
   wrapper.updateMatrixWorld(true);
   const invRoot = new THREE.Matrix4().copy(wrapper.matrixWorld).invert();
@@ -245,7 +255,13 @@ export function buildCollisionMeshData(
   });
 
   if (!tris.length) {
-    return { bvh: null, interiorPts: [] };
+    return {
+      bvh: null,
+      interiorPts: [],
+      antiStuds: meta.antiStuds || [],
+      isMinifigHead: Boolean(meta.isMinifigHead),
+      headTopStud: meta.headTopStud || null,
+    };
   }
 
   const buildCleanNode = (list) => {
@@ -306,7 +322,13 @@ export function buildCollisionMeshData(
     }
   }
 
-  return { bvh, interiorPts };
+  return {
+    bvh,
+    interiorPts,
+    antiStuds: meta.antiStuds || [],
+    isMinifigHead: Boolean(meta.isMinifigHead),
+    headTopStud: meta.headTopStud || null,
+  };
 }
 
 function pointDistSqToSeg(px, py, pz, ax, ay, az, bx, by, bz) {
@@ -508,6 +530,74 @@ function bvhNodesOverlap(nodeA, nodeB, e) {
   );
 }
 
+function isStudToAntiStudSeated(headData, posH, quatH, gearData, posG, quatG) {
+  if (!headData?.isMinifigHead || !headData.headTopStud || !gearData?.antiStuds?.length) {
+    return false;
+  }
+  _scratchStudPos.copy(headData.headTopStud.pos).applyQuaternion(quatH).add(posH);
+  _scratchStudUp.copy(headData.headTopStud.up).applyQuaternion(quatH).normalize();
+  for (let i = 0; i < gearData.antiStuds.length; i += 1) {
+    const anti = gearData.antiStuds[i];
+    _scratchAntiPos.copy(anti.pos).applyQuaternion(quatG).add(posG);
+    _scratchAntiDir.copy(anti.dir).applyQuaternion(quatG).normalize();
+    if (
+      _scratchStudUp.dot(_scratchAntiDir) < -0.95 &&
+      _scratchStudPos.distanceToSquared(_scratchAntiPos) <= 1.2 * 1.2
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+const _headCoreBounds = {
+  minX: -9.0,
+  minY: -23.5,
+  minZ: -9.0,
+  maxX: 9.0,
+  maxY: -1.5,
+  maxZ: 9.0,
+};
+
+function pointInsideHeadCore(x, y, z, cx = 0, cz = 0) {
+  const dx = x - cx;
+  const dz = z - cz;
+  return y >= -23.5 && y <= -1.5 && dx * dx + dz * dz < 81.0;
+}
+
+function bvhPenetratesHeadCore(gearNode, e, coreX = 0, coreZ = 0) {
+  if (!gearNode || !transformedBoxOverlapsNode(_headCoreBounds, gearNode, e)) {
+    return false;
+  }
+  if (gearNode.tris) {
+    for (let i = 0; i < gearNode.tris.length; i += 1) {
+      const t = gearNode.tris[i];
+      const ax = e[0] * t.ax + e[4] * t.ay + e[8] * t.az + e[12];
+      const ay = e[1] * t.ax + e[5] * t.ay + e[9] * t.az + e[13];
+      const az = e[2] * t.ax + e[6] * t.ay + e[10] * t.az + e[14];
+      const bx = e[0] * t.bx + e[4] * t.by + e[8] * t.bz + e[12];
+      const by = e[1] * t.bx + e[5] * t.by + e[9] * t.bz + e[13];
+      const bz = e[2] * t.bx + e[6] * t.by + e[10] * t.bz + e[14];
+      const cx = e[0] * t.cx + e[4] * t.cy + e[8] * t.cz + e[12];
+      const cy = e[1] * t.cx + e[5] * t.cy + e[9] * t.cz + e[13];
+      const cz = e[2] * t.cx + e[6] * t.cy + e[10] * t.cz + e[14];
+      if (
+        pointInsideHeadCore(ax, ay, az, coreX, coreZ) ||
+        pointInsideHeadCore(bx, by, bz, coreX, coreZ) ||
+        pointInsideHeadCore(cx, cy, cz, coreX, coreZ) ||
+        pointInsideHeadCore((ax + bx + cx) / 3, (ay + by + cy) / 3, (az + bz + cz) / 3, coreX, coreZ)
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+  return (
+    bvhPenetratesHeadCore(gearNode.left, e, coreX, coreZ) ||
+    bvhPenetratesHeadCore(gearNode.right, e, coreX, coreZ)
+  );
+}
+
 /**
  * Comprueba colisión geométrica exacta (triángulos BVH + inclusión interior) entre dos piezas.
  */
@@ -517,12 +607,34 @@ export function checkMeshBvhCollision(meshDataA, posA, quatA, meshDataB, posB, q
   _scratchMatA.compose(posA, quatA, _unitScale);
   _scratchMatB.compose(posB, quatB, _unitScale);
   _scratchMatBtoA.copy(_scratchMatA).invert().multiply(_scratchMatB);
+  _scratchMatAtoB.copy(_scratchMatBtoA).invert();
+
+  // Pelucas/cascos LDD (`antiStuds`) moldean su cavidad interna con ajuste de interferencia (~0.3..1.7 LDU)
+  // alrededor del casquete/cilindro de la cabeza: al encastrar coaxialmente sobre su stud superior,
+  // validamos que no invadan el núcleo sólido interno de la cabeza en lugar de bloquear ese ajuste.
+  if (isStudToAntiStudSeated(meshDataA, posA, quatA, meshDataB, posB, quatB)) {
+    const cx = meshDataA.headTopStud?.pos?.x || 0;
+    const cz = meshDataA.headTopStud?.pos?.z || 0;
+    _headCoreBounds.minX = cx - 9.0;
+    _headCoreBounds.maxX = cx + 9.0;
+    _headCoreBounds.minZ = cz - 9.0;
+    _headCoreBounds.maxZ = cz + 9.0;
+    return bvhPenetratesHeadCore(meshDataB.bvh, _scratchMatBtoA.elements, cx, cz);
+  }
+  if (isStudToAntiStudSeated(meshDataB, posB, quatB, meshDataA, posA, quatA)) {
+    const cx = meshDataB.headTopStud?.pos?.x || 0;
+    const cz = meshDataB.headTopStud?.pos?.z || 0;
+    _headCoreBounds.minX = cx - 9.0;
+    _headCoreBounds.maxX = cx + 9.0;
+    _headCoreBounds.minZ = cz - 9.0;
+    _headCoreBounds.maxZ = cz + 9.0;
+    return bvhPenetratesHeadCore(meshDataA.bvh, _scratchMatAtoB.elements, cx, cz);
+  }
 
   if (bvhNodesOverlap(meshDataA.bvh, meshDataB.bvh, _scratchMatBtoA.elements)) {
     return true;
   }
 
-  _scratchMatAtoB.copy(_scratchMatBtoA).invert();
   for (let i = 0; i < meshDataA.interiorPts.length; i += 1) {
     const pt = meshDataA.interiorPts[i];
     _scratchVec.set(pt.x, pt.y, pt.z).applyMatrix4(_scratchMatAtoB);

@@ -139,7 +139,7 @@ function countDisagreeingWinding(geo) {
   return disagree;
 }
 
-test("buildBatchedGeometries corrige winding de sub-mallas espejadas (det < 0 y pieza 7796)", async (t) => {
+test("buildBatchedGeometries corrige winding de sub-mallas espejadas (det < 0, 7796 y minifiguras)", async (t) => {
   const wrapper = new THREE.Group();
   const mat = new THREE.MeshStandardMaterial({ color: 0x999999 });
   const mirrored = new THREE.Mesh(new THREE.BoxGeometry(10, 10, 10), mat);
@@ -183,5 +183,19 @@ test("buildBatchedGeometries corrige winding de sub-mallas espejadas (det < 0 y 
       rawDisagree,
       "Pieza 7796 en batch debe conservar exactamente el winding de todas sus subpartes espejadas"
     );
+
+    for (const partId of ["76382", "37364", "105199"]) {
+      const p = await svc.createPartInstance(
+        { ldraw_part_id: partId, ldraw_color_code: 14 },
+        { lightweight: true, proxyOnly: true }
+      );
+      const geo = p.group.userData.batchedMeshGeo;
+      assert.ok(geo, `${partId} debe generar batchedMeshGeo`);
+      assert.equal(
+        countDisagreeingWinding(geo),
+        0,
+        `${partId} no debe tener triángulos con winding invertido`
+      );
+    }
   });
 });

@@ -64,10 +64,13 @@
             </div>
           </div>
 
-          <div id="lobby-sets-grid" class="lobby-sets-grid"></div>
-          <div id="lobby-empty" class="lobby-empty hidden">
-            No encontramos sets que coincidan con tu búsqueda.
+          <div class="lobby-sets-scroll">
+            <div id="lobby-sets-grid" class="lobby-sets-grid"></div>
+            <div id="lobby-empty" class="lobby-empty hidden">
+              No encontramos sets que coincidan con tu búsqueda.
+            </div>
           </div>
+          <nav id="lobby-pagination" class="lobby-pagination hidden" aria-label="Paginación de sets"></nav>
         </main>
       </div>
     </section>
@@ -171,6 +174,14 @@
               <div id="manual-status" class="manual-status">Cargando manual...</div>
               <div id="manual-pages" class="manual-pages"></div>
             </div>
+            <div
+              id="manual-resize-handle"
+              class="manual-resize-handle"
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Cambiar ancho del manual"
+              title="Arrastrar para agrandar o achicar el manual"
+            ></div>
           </aside>
 
           <button id="manual-tab" type="button" class="manual-tab hidden" title="Mostrar manual de instrucciones">
@@ -179,7 +190,7 @@
 
           <!-- Dock inferior flotante: Carrusel horizontal de piezas + barra de acciones -->
           <div id="bottom-dock" class="bottom-dock">
-            <section id="tray-panel" class="tray-dock">
+            <section id="tray-panel" class="tray-dock hidden">
               <div class="tray-dock-header">
                 <div class="tray-tabs" role="tablist">
                   <button type="button" class="tray-tab is-active" data-tab="all">
@@ -229,7 +240,7 @@
 
               <div class="bottom-center-tools">
                 <button id="btn-toggle-manual" type="button" class="btn" title="Mostrar u ocultar manual">Manual</button>
-                <button id="btn-toggle-tray" type="button" class="btn is-on" title="Mostrar u ocultar barra de piezas">Piezas</button>
+                <button id="btn-toggle-tray" type="button" class="btn" title="Mostrar u ocultar barra de piezas">Piezas</button>
                 <button id="btn-fine-grid" class="btn" title="Tecla Q">Grilla 1 stud</button>
                 <button id="btn-fine-rot" class="btn" title="Tecla E">Giro 90°</button>
                 <button id="btn-auto-orient" class="btn is-on" title="Tecla U">Auto-orientar</button>
@@ -286,6 +297,18 @@
                     <path d="M19.8 19.2a6.9 6.9 0 0 0-.9-3.8c2.2.3 3.8 1.8 3.8 3.8h-2.9Z" />
                   </svg>
                 </button>
+                <button
+                  id="btn-tray-settings"
+                  type="button"
+                  class="btn-circle btn-tray-settings-tool"
+                  title="Configurar cantidad de cajas"
+                  aria-pressed="false"
+                >
+                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <circle cx="12" cy="12" r="3.2" />
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08A1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z" />
+                  </svg>
+                </button>
                 <button id="btn-undo" class="btn glass-btn" title="Ctrl + Z">↶ Deshacer</button>
                 <button id="btn-clear-build" class="btn glass-btn btn-danger">↻ Reiniciar</button>
                 <button id="btn-export-build" class="btn glass-btn" title="Descargar archivo .json">↑ Exportar</button>
@@ -322,6 +345,45 @@
                 Subir imagen...
                 <input id="input-sticker-file" type="file" accept="image/*" hidden />
               </label>
+            </div>
+          </div>
+
+          <!-- Popover para configurar cantidad de cajas de piezas -->
+          <div id="tray-settings-popover" class="sticker-popover tray-settings-popover hidden" role="dialog" aria-label="Configurar cantidad de cajas">
+            <div class="sticker-popover-header">
+              <strong>Cajas de piezas</strong>
+              <button id="btn-close-tray-settings" type="button" class="btn btn-sm" title="Cerrar">✕</button>
+            </div>
+            <p id="tray-settings-summary" class="sticker-popover-hint"></p>
+            <div class="tray-settings-row">
+              <label for="input-tray-count">Cantidad de cajas</label>
+              <div class="tray-count-control">
+                <input id="input-tray-count" class="tray-count-input" type="number" min="1" max="24" step="1" />
+                <div class="tray-count-steppers">
+                  <button id="btn-tray-inc" type="button" class="tray-step-btn" title="Aumentar cajas" aria-label="Aumentar cajas">
+                    <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <polyline points="2.5 7.5 6 4 9.5 7.5"></polyline>
+                    </svg>
+                  </button>
+                  <button id="btn-tray-dec" type="button" class="tray-step-btn" title="Disminuir cajas" aria-label="Disminuir cajas">
+                    <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <polyline points="2.5 4.5 6 8 9.5 4.5"></polyline>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+            <p id="tray-settings-estimate" class="tray-settings-estimate"></p>
+            <div id="tray-settings-warning" class="tray-settings-warning hidden">
+              <p id="tray-settings-warning-text"></p>
+              <div class="tray-settings-warning-actions">
+                <button id="btn-tray-warning-cancel" type="button" class="btn btn-sm">Cancelar</button>
+                <button id="btn-tray-warning-confirm" type="button" class="btn btn-sm btn-danger">Sí, aplicar igual</button>
+              </div>
+            </div>
+            <div class="sticker-popover-actions">
+              <button id="btn-tray-default" type="button" class="btn">Por defecto</button>
+              <button id="btn-tray-apply" type="button" class="btn btn-primary">Aplicar</button>
             </div>
           </div>
 
