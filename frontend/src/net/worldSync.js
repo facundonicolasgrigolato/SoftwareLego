@@ -1,6 +1,14 @@
 import * as THREE from "three";
 import { LIGHTWEIGHT_RENDER_THRESHOLD, MAX_SUPPORTED_PIECES, PILE_BATCH_SIZE } from "../core/constants.js";
 import { computeTableLayout } from "../core/tableLayout.js";
+import {
+  clearStickersFromMesh,
+  detachPlacedPiece,
+  movePlacedPieceToPile,
+  refreshPlacedWorldBox,
+  spawnPileItemFromData,
+  spawnPlacedPieceFromData,
+} from "../builder/worldTransitions.js";
 
 function serializeVec3(v) {
   return { x: v.x, y: v.y, z: v.z };
@@ -8,6 +16,20 @@ function serializeVec3(v) {
 
 function serializeQuat(q) {
   return { x: q.x, y: q.y, z: q.z, w: q.w };
+}
+
+function isFiniteVec3(v) {
+  return Boolean(v && Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z));
+}
+
+function isFiniteQuat(q) {
+  return Boolean(
+    q &&
+      Number.isFinite(q.x) &&
+      Number.isFinite(q.y) &&
+      Number.isFinite(q.z) &&
+      Number.isFinite(q.w)
+  );
 }
 
 export function exportWorldSnapshot(bc) {
@@ -230,6 +252,7 @@ export async function applyGuestOpOnHost(bc, msg) {
   }
 
   if (msg.op === "place-pool") {
+    if (!isFiniteVec3(msg.position) || (!msg.intoPile && !isFiniteVec3(msg.rotation))) return null;
     const part = bc.partsByElementId.get(msg.elementId);
     if (!part || bc.getRemainingCount(msg.elementId) <= 0) return null;
     const poolEntry = removeFromPool(bc, msg.elementId);
@@ -304,6 +327,7 @@ export async function applyGuestOpOnHost(bc, msg) {
   }
 
   if (msg.op === "pile-to-placed") {
+    if (!isFiniteVec3(msg.position) || !isFiniteVec3(msg.rotation)) return null;
     const removed = bc.pilePhysics.removePiece(msg.pileInstanceId);
     if (!removed) return null;
     bc.sceneManager.removePileMesh(removed.mesh);
@@ -348,6 +372,7 @@ export async function applyGuestOpOnHost(bc, msg) {
   }
 
   if (msg.op === "move-pile-drop") {
+    if (!isFiniteVec3(msg.position)) return null;
     const entry = bc.pilePhysics.items.find((it) => it.instanceId === msg.pileInstanceId);
     if (!entry) return null;
     entry.body.position.set(msg.position.x, Math.max(30, msg.position.y), msg.position.z);
@@ -358,6 +383,7 @@ export async function applyGuestOpOnHost(bc, msg) {
   }
 
   if (msg.op === "move-placed") {
+    if (!isFiniteVec3(msg.position) || !isFiniteVec3(msg.rotation)) return null;
     const piece = bc.placedPieces.find((p) => p.instanceId === msg.instanceId);
     if (!piece) return null;
     const prevState = {
@@ -389,6 +415,7 @@ export async function applyGuestOpOnHost(bc, msg) {
     const moveRecords = [];
     const outItems = [];
     for (const rec of msg.items || []) {
+      if (!isFiniteVec3(rec?.position) || !isFiniteVec3(rec?.rotation)) continue;
       const p = bc.placedPieces.find((x) => x.instanceId === rec.instanceId);
       if (!p) continue;
       const origPos = p.mesh.position.clone();
@@ -418,46 +445,20 @@ export async function applyGuestOpOnHost(bc, msg) {
   if (msg.op === "to-pile") {
     const target = bc.placedPieces.find((p) => p.instanceId === msg.instanceId);
     if (!target) return null;
-    const origPos = target.mesh.position.clone();
-    const origRot = target.mesh.rotation.clone();
-    const savedStickers = Array.isArray(target.stickers) ? structuredClone(target.stickers) : [];
     if (bc.selected?.item === target) bc.clearSelection();
-    bc._clearStickersFromMesh(target.mesh);
-    target.stickers = [];
-    bc.sceneManager.removePlacedMesh(target.mesh);
-    bc.placedPieces = bc.placedPieces.filter((p) => p.instanceId !== target.instanceId);
-
-    const pileId = `pile_${bc.nextInstanceSeq++}`;
-    target.mesh.userData.instanceId = pileId;
-    const bagNum = target.mesh.userData.bagNumber || bc._getDefaultBagForElement(target.elementId);
     const dropPos = msg.position
       ? { x: msg.position.x, y: Math.max(30, msg.position.y), z: msg.position.z }
       : null;
-    bc.pilePhysics.addPiece(pileId, target.elementId, target.mesh, target.localBox, dropPos, !dropPos, bagNum);
-    bc.sceneManager.addPileMesh(target.mesh);
+    const { undoEntry, netPileItem } = movePlacedPieceToPile(bc, target, { dropPos });
 
-    bc.history.push({
-      type: "remove",
-      instanceId: target.instanceId,
-      pileInstanceId: pileId,
-      elementId: target.elementId,
-      position: origPos,
-      rotation: origRot,
-      stickers: savedStickers,
-    });
+    bc.history.push({ type: "remove", ...undoEntry });
     bc._emitChange();
     return {
       type: "world:op",
       op: "placed-to-pile",
       nextInstanceSeq: bc.nextInstanceSeq,
       removedInstanceId: target.instanceId,
-      pileItem: {
-        instanceId: pileId,
-        elementId: target.elementId,
-        bagNumber: bagNum,
-        position: serializeVec3(target.mesh.position),
-        quaternion: serializeQuat(target.mesh.quaternion),
-      },
+      pileItem: netPileItem,
     };
   }
 
@@ -474,38 +475,18 @@ export async function applyGuestOpOnHost(bc, msg) {
     }
     bc.placedPieces = bc.placedPieces.filter((p) => !removedIds.has(p.instanceId));
 
+    const dropPos = msg.position
+      ? { x: msg.position.x, y: Math.max(30, msg.position.y), z: msg.position.z }
+      : null;
     const undoItems = [];
     const pileItems = [];
     for (const target of items) {
-      const origPos = target.mesh.position.clone();
-      const origRot = target.mesh.rotation.clone();
-      const savedStickers = Array.isArray(target.stickers) ? structuredClone(target.stickers) : [];
-      bc._clearStickersFromMesh(target.mesh);
-      target.stickers = [];
-      bc.sceneManager.removePlacedMesh(target.mesh);
-      const pileId = `pile_${bc.nextInstanceSeq++}`;
-      target.mesh.userData.instanceId = pileId;
-      const bagNum = target.mesh.userData.bagNumber || bc._getDefaultBagForElement(target.elementId);
-      const dropPos = msg.position
-        ? { x: msg.position.x, y: Math.max(30, msg.position.y), z: msg.position.z }
-        : null;
-      bc.pilePhysics.addPiece(pileId, target.elementId, target.mesh, target.localBox, dropPos, !dropPos, bagNum);
-      bc.sceneManager.addPileMesh(target.mesh);
-      undoItems.push({
-        instanceId: target.instanceId,
-        pileInstanceId: pileId,
-        elementId: target.elementId,
-        position: origPos,
-        rotation: origRot,
-        stickers: savedStickers,
+      const { undoEntry, netPileItem } = movePlacedPieceToPile(bc, target, {
+        dropPos,
+        filterPlaced: false,
       });
-      pileItems.push({
-        instanceId: pileId,
-        elementId: target.elementId,
-        bagNumber: bagNum,
-        position: serializeVec3(target.mesh.position),
-        quaternion: serializeQuat(target.mesh.quaternion),
-      });
+      undoItems.push(undoEntry);
+      pileItems.push(netPileItem);
     }
     bc.history.push({ type: "remove-group", items: undoItems });
     bc._emitChange();
@@ -534,44 +515,8 @@ export async function applyWorldOpOnGuest(bc, msg) {
     removeFromPool(bc, msg.consumePoolElementId);
   }
 
-  const spawnPlacedPiece = async (pData) => {
-    const part = bc.partsByElementId.get(pData.elementId);
-    if (!part) return;
-    if (bc.placedPieces.some((x) => x.instanceId === pData.instanceId)) return;
-    const { group, localBox } = await bc.ldrawService.createPartInstance(part, {
-      lightweight: bc.isLightweightSet,
-      proxyOnly: true,
-    });
-    group.position.set(pData.position.x, pData.position.y, pData.position.z);
-    group.rotation.set(pData.rotation.x, pData.rotation.y, pData.rotation.z);
-    group.userData.instanceId = pData.instanceId;
-    group.userData.elementId = pData.elementId;
-    group.userData.bagNumber = pData.bagNumber || 1;
-    bc.sceneManager.addPlacedMesh(group);
-    const placed = { instanceId: pData.instanceId, elementId: pData.elementId, mesh: group, localBox, stickers: [] };
-    bc._refreshPlacedWorldBox(placed);
-    bc.placedPieces.push(placed);
-  };
-
-  const spawnPileItem = async (itData) => {
-    const part = bc.partsByElementId.get(itData.elementId);
-    if (!part) return;
-    if (bc.pilePhysics.items.some((x) => x.instanceId === itData.instanceId)) return;
-    const { group, localBox } = await bc.ldrawService.createPartInstance(part, {
-      lightweight: bc.isLightweightSet,
-      proxyOnly: true,
-    });
-    const bagNum = itData.bagNumber || 1;
-    group.userData.instanceId = itData.instanceId;
-    group.userData.elementId = itData.elementId;
-    group.userData.bagNumber = bagNum;
-    group.position.set(itData.position.x, itData.position.y, itData.position.z);
-    if (itData.quaternion) {
-      group.quaternion.set(itData.quaternion.x, itData.quaternion.y, itData.quaternion.z, itData.quaternion.w);
-    }
-    bc.pilePhysics.addPiece(itData.instanceId, itData.elementId, group, localBox, itData.position, true, bagNum);
-    bc.sceneManager.addPileMesh(group);
-  };
+  const spawnPlacedPiece = (pData) => spawnPlacedPieceFromData(bc, pData);
+  const spawnPileItem = (itData) => spawnPileItemFromData(bc, itData, isFiniteQuat);
 
   switch (msg.op) {
     case "add-placed":
@@ -597,7 +542,7 @@ export async function applyWorldOpOnGuest(bc, msg) {
         piece.mesh.position.set(msg.position.x, msg.position.y, msg.position.z);
         piece.mesh.rotation.set(msg.rotation.x, msg.rotation.y, msg.rotation.z);
         bc.sceneManager.setPlacedVisible(piece.mesh, true);
-        bc._refreshPlacedWorldBox(piece);
+        refreshPlacedWorldBox(bc, piece);
         if (bc.selected?.item === piece) bc.sceneManager.refreshSelectionBox();
       }
       break;
@@ -610,7 +555,7 @@ export async function applyWorldOpOnGuest(bc, msg) {
         piece.mesh.position.set(rec.position.x, rec.position.y, rec.position.z);
         piece.mesh.rotation.set(rec.rotation.x, rec.rotation.y, rec.rotation.z);
         bc.sceneManager.setPlacedVisible(piece.mesh, true);
-        bc._refreshPlacedWorldBox(piece);
+        refreshPlacedWorldBox(bc, piece);
       }
       if (bc.selected?.kind === "group") bc.sceneManager.refreshSelectionBox();
       break;
@@ -620,9 +565,7 @@ export async function applyWorldOpOnGuest(bc, msg) {
       const target = bc.placedPieces.find((p) => p.instanceId === msg.removedInstanceId);
       if (target) {
         if (bc.selected?.item === target) bc.clearSelection();
-        bc._clearStickersFromMesh(target.mesh);
-        target.stickers = [];
-        bc.sceneManager.removePlacedMesh(target.mesh);
+        detachPlacedPiece(bc, target);
         bc.placedPieces = bc.placedPieces.filter((p) => p.instanceId !== target.instanceId);
       }
       await spawnPileItem(msg.pileItem);
@@ -638,9 +581,7 @@ export async function applyWorldOpOnGuest(bc, msg) {
       }
       for (const target of bc.placedPieces) {
         if (!remSet.has(target.instanceId)) continue;
-        bc._clearStickersFromMesh(target.mesh);
-        target.stickers = [];
-        bc.sceneManager.removePlacedMesh(target.mesh);
+        detachPlacedPiece(bc, target);
       }
       bc.placedPieces = bc.placedPieces.filter((p) => !remSet.has(p.instanceId));
       for (const it of msg.pileItems || []) {

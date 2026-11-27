@@ -6,6 +6,7 @@ import {
 } from "./constants.js";
 import { computeTableLayout } from "./tableLayout.js";
 import { BatchedPieceLayer } from "./batchedPieceLayer.js";
+import { isIgnoredObject } from "./threeHelpers.js";
 
 /**
  * Administra el renderer WebGL, cámara orbital + WASD, mesa de madera dinámica
@@ -650,8 +651,7 @@ export class SceneManager {
     this.pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
     this.raycaster.setFromCamera(this.pointer, this.camera);
 
-    const isIgnored = (obj) =>
-      ignoreObject instanceof Set ? ignoreObject.has(obj) : obj === ignoreObject;
+    const isIgnored = (obj) => isIgnoredObject(ignoreObject, obj);
 
     const ray = this.raycaster.ray;
     const targets = [];
@@ -742,7 +742,7 @@ export class SceneManager {
   _animate() {
     this._animFrame = requestAnimationFrame(() => this._animate());
     const now = performance.now();
-    const dt = (now - this._lastTime) / 1000;
+    const dt = Math.min(0.05, Math.max(0, (now - this._lastTime) / 1000));
     this._lastTime = now;
 
     this._updateWASD(dt);

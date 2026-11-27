@@ -1,6 +1,6 @@
 import { BuildController } from "./builder/buildController.js";
-import { computeFaceStickerPlacement, fileToStickerDataUrl } from "./builder/stickerDecal.js";
-import { saveSlotToDisk, serializeBuildState } from "./builder/storage.js";
+import { computeFaceStickerPlacement } from "./builder/stickerDecal.js";
+import { saveSlotToDisk, serializeBuildState, validateImportedSave } from "./builder/storage.js";
 import { LDrawService } from "./core/ldrawService.js";
 import { PartThumbnailRenderer } from "./core/partThumbnailRenderer.js";
 import { SceneManager } from "./core/sceneManager.js";
@@ -10,7 +10,9 @@ import { HelpGuide } from "./ui/helpGuide.js";
 import { LobbyView } from "./ui/lobbyView.js";
 import { ManualDrawer, buildManualHistoryKey } from "./ui/manualDrawer.js";
 import { RoomModal } from "./ui/roomModal.js";
+import { StickerToolController } from "./ui/stickerToolController.js";
 import { TrayPanel } from "./ui/trayPanel.js";
+import { TraySettingsPopover } from "./ui/traySettingsPopover.js";
 
 const editorAppEl = document.getElementById("editor-app");
 const topbarEl = document.getElementById("topbar");
@@ -118,73 +120,50 @@ let autoSaveInFlight = false;
 let autoSaveQueued = false;
 let hudVisible = true;
 let trayVisible = false;
-let stickerMode = false;
-let pendingStickerTarget = null; // { piece, placement }
 
-function refreshStickerStatusPill() {
-  if (!stickerMode) return false;
-  statusPillEl.textContent = pendingStickerTarget
-    ? "Pegá una imagen (Ctrl+V), subila o cerrá con ✕ / Esc"
-    : "Modo pegatina: clic en una cara para pegar · clic en una pegatina para quitarla · Esc/Ctrl+Z cancelar";
-  statusPillEl.classList.remove("hidden");
-  return true;
-}
+const stickerTool = new StickerToolController({
+  editorAppEl,
+  btnToggleEl: btnStickerModeEl,
+  popoverEl: stickerPopoverEl,
+  btnCloseEl: btnCloseStickerEl,
+  btnPasteEl: btnStickerPasteEl,
+  inputFileEl: inputStickerFileEl,
+  statusPillEl,
+  viewportEl,
+  getBuildController: () => buildController,
+  onBeforeEnterMode: () => {
+    if (marqueeState) {
+      clearMarquee();
+      sceneManager.controls.enabled = true;
+    }
+  },
+  showToast: (msg) => showToast(msg),
+});
 
-function closeStickerPopover() {
-  pendingStickerTarget = null;
-  stickerPopoverEl?.classList.add("hidden");
-  if (inputStickerFileEl) inputStickerFileEl.value = "";
-}
-
-function setStickerMode(enabled) {
-  stickerMode = Boolean(enabled);
-  editorAppEl?.classList.toggle("is-sticker-mode", stickerMode);
-  btnStickerModeEl?.classList.toggle("is-on", stickerMode);
-  btnStickerModeEl?.setAttribute("aria-pressed", String(stickerMode));
-
-  if (!stickerMode) {
-    closeStickerPopover();
-    buildController?._emitStatus?.();
-    return;
-  }
-
-  if (buildController.carry) buildController.cancelCarry();
-  if (marqueeState) {
-    clearMarquee();
-    sceneManager.controls.enabled = true;
-  }
-  buildController.clearSelection();
-  refreshStickerStatusPill();
-}
-
-function openStickerPopover(piece, placement, clientX, clientY) {
-  pendingStickerTarget = { piece, placement };
-  if (!stickerPopoverEl) return;
-  const wrapRect = viewportEl.getBoundingClientRect();
-  const popW = 282;
-  const popH = 158;
-  const rawLeft = clientX - wrapRect.left + 14;
-  const rawTop = clientY - wrapRect.top + 14;
-  const clampedLeft = Math.max(12, Math.min(rawLeft, Math.max(12, wrapRect.width - popW - 12)));
-  const clampedTop = Math.max(58, Math.min(rawTop, Math.max(58, wrapRect.height - popH - 12)));
-  stickerPopoverEl.style.left = `${clampedLeft}px`;
-  stickerPopoverEl.style.top = `${clampedTop}px`;
-  stickerPopoverEl.classList.remove("hidden");
-  refreshStickerStatusPill();
-}
-
-async function applyPendingStickerBlob(blobOrFile) {
-  const target = pendingStickerTarget;
-  if (!target || !blobOrFile) return;
-  try {
-    const dataUrl = await fileToStickerDataUrl(blobOrFile, 512);
-    buildController.applyStickerToPlacedPiece(target.piece, target.placement, dataUrl);
-    setStickerMode(false);
-    showToast("Pegatina aplicada en esa cara (Ctrl+Z para deshacer).");
-  } catch (err) {
-    showToast(err?.message || "No se pudo aplicar la imagen.");
-  }
-}
+const traySettingsPopover = new TraySettingsPopover({
+  popoverEl: traySettingsPopoverEl,
+  btnOpenEl: btnTraySettingsEl,
+  btnCloseEl: btnCloseTraySettingsEl,
+  summaryEl: traySettingsSummaryEl,
+  inputCountEl: inputTrayCountEl,
+  btnIncEl: btnTrayIncEl,
+  btnDecEl: btnTrayDecEl,
+  estimateEl: traySettingsEstimateEl,
+  warningEl: traySettingsWarningEl,
+  warningTextEl: traySettingsWarningTextEl,
+  btnWarningCancelEl: btnTrayWarningCancelEl,
+  btnWarningConfirmEl: btnTrayWarningConfirmEl,
+  btnDefaultEl: btnTrayDefaultEl,
+  btnApplyEl: btnTrayApplyEl,
+  workspaceEl,
+  getBuildController: () => buildController,
+  getRoomManager: () => roomManager,
+  onApplied: (effectiveManifest) => {
+    trayPanel.setManifest(effectiveManifest);
+    scheduleAutoSave();
+  },
+  showToast: (msg) => showToast(msg),
+});
 
 async function persistCurrentSlot({ showToastOnSuccess = false } = {}) {
   if (!currentSetNumber || !currentSlotNumber || isLoadingSlot || roomManager?.isGuest()) return;
@@ -236,7 +215,7 @@ function updateLayoutVisibility() {
   workspaceEl.classList.toggle("hud-hidden", !hudVisible);
   minimalControlsEl.classList.toggle("hidden", hudVisible);
   if (!hudVisible) {
-    closeTraySettingsPopover();
+    traySettingsPopover.close();
   }
 
   const showTray = hudVisible && trayVisible;
@@ -284,7 +263,7 @@ const buildController = new BuildController(sceneManager, ldrawService, {
       btnDropBatchEl.classList.add("hidden");
     }
 
-    if (refreshStickerStatusPill()) {
+    if (stickerTool.refreshStatusPill()) {
       // Mantiene el aviso de modo pegatina activo sobre el estado normal
     } else if (state.isCarrying && state.carryGroupCount > 1) {
       statusPillEl.textContent = `Grupo temporal (${state.carryGroupCount} piezas) · Click para soltar · Esc cancelar`;
@@ -353,7 +332,7 @@ const roomManager = new RoomManager({
         })
         .then(() => {
           trayPanel?.setManifest(buildController.getEffectiveManifest());
-          refreshTraySettingsUI();
+          traySettingsPopover.refresh();
         });
     }
   },
@@ -373,7 +352,7 @@ const roomManager = new RoomManager({
           })
           .then(() => {
             trayPanel?.setManifest(buildController.getEffectiveManifest());
-            refreshTraySettingsUI();
+            traySettingsPopover.refresh();
           });
       }
     } else if (msg.type === "world:op") {
@@ -438,8 +417,8 @@ function applyRolePermissions() {
   lblImportBuildEl?.classList.toggle("hidden", isGuest);
   btnSaveSlotEl?.classList.toggle("hidden", isGuest);
   if (isGuest) {
-    if (stickerMode) setStickerMode(false);
-    closeTraySettingsPopover();
+    if (stickerTool.isActive()) stickerTool.setMode(false);
+    traySettingsPopover.close();
     roomModal.hide();
   }
 }
@@ -448,22 +427,25 @@ function renderRoomStatusChip(state) {
   if (!roomStatusChipEl) return;
   const active = state.mode === "open" || state.mode === "joined";
   roomStatusChipEl.classList.toggle("hidden", !active);
+  roomStatusChipEl.replaceChildren();
   if (!active) {
-    roomStatusChipEl.innerHTML = "";
     return;
   }
   const players = Array.isArray(state.players) ? state.players : [];
-  const dots = players
-    .map(
-      (p) =>
-        `<span class="room-chip-dot" style="background:${p.color}" title="${p.name}"></span>`
-    )
-    .join("");
+  for (const p of players) {
+    const dot = document.createElement("span");
+    dot.className = "room-chip-dot";
+    dot.style.backgroundColor = typeof p?.color === "string" ? p.color : "#38bdf8";
+    dot.title = String(p?.name || "Jugador");
+    roomStatusChipEl.appendChild(dot);
+  }
   const label =
     state.role === "host" && state.roomCode
       ? `Sala ${state.roomCode} · ${players.length}/4`
       : `En sala · ${players.length}/4`;
-  roomStatusChipEl.innerHTML = `${dots}<span>${label}</span>`;
+  const labelEl = document.createElement("span");
+  labelEl.textContent = label;
+  roomStatusChipEl.appendChild(labelEl);
   roomStatusChipEl.classList.toggle("is-clickable", state.role === "host");
   roomStatusChipEl.title =
     state.role === "host" ? "Administrar sala" : "Conectado como amigo";
@@ -612,7 +594,7 @@ canvas.addEventListener(
       document.activeElement.blur();
     }
     if (ev.button === 0) {
-      if (stickerMode) {
+      if (stickerTool.isActive()) {
         leftDownPos = { x: ev.clientX, y: ev.clientY };
         return;
       }
@@ -690,7 +672,7 @@ window.addEventListener("pointerup", (ev) => {
   if (ev.button === 0 && leftDownPos) {
     const dist = Math.hypot(ev.clientX - leftDownPos.x, ev.clientY - leftDownPos.y);
     leftDownPos = null;
-    if (stickerMode) {
+    if (stickerTool.isActive()) {
       if (dist < 5) {
         const hit = sceneManager.raycastWorkspace(ev.clientX, ev.clientY, { includePile: false });
         if (!hit || hit.kind !== "placed") {
@@ -709,11 +691,11 @@ window.addEventListener("pointerup", (ev) => {
         });
         const existingKey = hit.stickerFaceKey || (buildController.hasStickerOnFace(piece, placement.faceKey) ? placement.faceKey : null);
         if (existingKey && buildController.removeStickerFromPlacedPiece(piece, existingKey)) {
-          setStickerMode(false);
+          stickerTool.setMode(false);
           showToast("Pegatina quitada de esa cara (Ctrl+Z para deshacer).");
           return;
         }
-        openStickerPopover(piece, placement, ev.clientX, ev.clientY);
+        stickerTool.openPopover(piece, placement, ev.clientX, ev.clientY);
       }
       return;
     }
@@ -732,205 +714,16 @@ btnRotEl.addEventListener("click", () => buildController.toggleFineRotation());
 btnAutoOrientEl.addEventListener("click", () => buildController.toggleAutoOrient());
 btnCollisionEl.addEventListener("click", () => buildController.toggleCollision());
 btnUndoEl.addEventListener("click", () => buildController.undo());
-btnStickerModeEl?.addEventListener("click", () => setStickerMode(!stickerMode));
+btnStickerModeEl?.addEventListener("click", () => stickerTool.setMode(!stickerTool.isActive()));
 btnMultiplayerEl?.addEventListener("click", () => {
   if (roomManager.isGuest()) return;
-  closeTraySettingsPopover();
+  traySettingsPopover.close();
   if (roomModal.isOpen()) roomModal.hide();
   else roomModal.show();
 });
 
-const TRAY_WARNING_AVG_LIMIT = 150;
-let pendingTrayConfirmCount = null;
-
-function isTraySettingsOpen() {
-  return Boolean(traySettingsPopoverEl && !traySettingsPopoverEl.classList.contains("hidden"));
-}
-
-function refreshTraySettingsUI() {
-  const isCustom = buildController.customBoxCount != null;
-  const open = isTraySettingsOpen();
-  btnTraySettingsEl?.classList.toggle("is-on", open || isCustom);
-  btnTraySettingsEl?.setAttribute("aria-pressed", String(open));
-  if (btnTrayDefaultEl) {
-    const defCount = buildController.getDefaultBoxCount();
-    btnTrayDefaultEl.textContent = `Por defecto (${defCount})`;
-  }
-}
-
-function updateTrayEstimateDisplay() {
-  if (!inputTrayCountEl || !traySettingsEstimateEl) return;
-  const raw = Math.round(Number(inputTrayCountEl.value));
-  const count = Number.isFinite(raw) ? Math.max(1, Math.min(24, raw)) : 1;
-  const looseCount = buildController.getLoosePieceCount();
-  const approx = count > 0 ? Math.ceil(looseCount / count) : 0;
-  traySettingsEstimateEl.textContent =
-    looseCount > 0
-      ? `Aprox. ${approx} pieza(s) por caja${approx > TRAY_WARNING_AVG_LIMIT ? " (muchas por caja)" : ""}`
-      : "No hay piezas sueltas en este momento.";
-}
-
-function hideTrayWarning() {
-  pendingTrayConfirmCount = null;
-  traySettingsWarningEl?.classList.add("hidden");
-}
-
-function closeTraySettingsPopover() {
-  hideTrayWarning();
-  traySettingsPopoverEl?.classList.add("hidden");
-  refreshTraySettingsUI();
-}
-
-function positionTraySettingsPopover() {
-  if (!traySettingsPopoverEl || !btnTraySettingsEl || !workspaceEl) return;
-  const wsRect = workspaceEl.getBoundingClientRect();
-  const btnRect = btnTraySettingsEl.getBoundingClientRect();
-  const popW = 304;
-  const popH = traySettingsPopoverEl.offsetHeight || 220;
-  const left = Math.max(
-    12,
-    Math.min(wsRect.width - popW - 12, btnRect.left - wsRect.left + btnRect.width / 2 - popW / 2)
-  );
-  const top = Math.max(12, btnRect.top - wsRect.top - popH - 12);
-  traySettingsPopoverEl.style.left = `${Math.round(left)}px`;
-  traySettingsPopoverEl.style.top = `${Math.round(top)}px`;
-}
-
-function openTraySettingsPopover() {
-  if (!traySettingsPopoverEl || roomManager.isGuest() || !buildController.manifest) return;
-  hideTrayWarning();
-  const looseCount = buildController.getLoosePieceCount();
-  const defCount = buildController.getDefaultBoxCount();
-  const curCount = buildController.getEffectiveBoxCount();
-  if (traySettingsSummaryEl) {
-    traySettingsSummaryEl.textContent = `Piezas sueltas: ${looseCount} · Por defecto: ${defCount} caja(s)`;
-  }
-  if (inputTrayCountEl) {
-    inputTrayCountEl.value = String(curCount);
-  }
-  updateTrayEstimateDisplay();
-  traySettingsPopoverEl.classList.remove("hidden");
-  positionTraySettingsPopover();
-  refreshTraySettingsUI();
-  inputTrayCountEl?.focus();
-  inputTrayCountEl?.select();
-}
-
-function commitTrayBoxCount(targetCount) {
-  if (!buildController.setCustomBoxCount(targetCount)) return;
-  trayPanel.setManifest(buildController.getEffectiveManifest());
-  closeTraySettingsPopover();
-  scheduleAutoSave();
-  if (targetCount == null) {
-    showToast(`Cajas restauradas por defecto (${buildController.getDefaultBoxCount()}).`);
-  } else {
-    showToast(`Piezas repartidas en ${targetCount} caja(s).`);
-  }
-}
-
-btnTraySettingsEl?.addEventListener("click", () => {
-  if (roomManager.isGuest()) return;
-  if (isTraySettingsOpen()) closeTraySettingsPopover();
-  else openTraySettingsPopover();
-});
-btnCloseTraySettingsEl?.addEventListener("click", closeTraySettingsPopover);
-inputTrayCountEl?.addEventListener("input", () => {
-  hideTrayWarning();
-  updateTrayEstimateDisplay();
-  positionTraySettingsPopover();
-});
-function stepTrayBoxCount(delta) {
-  if (!inputTrayCountEl) return;
-  const raw = Math.round(Number(inputTrayCountEl.value));
-  const cur = Number.isFinite(raw) ? raw : buildController.getEffectiveBoxCount();
-  const next = Math.max(1, Math.min(24, cur + delta));
-  inputTrayCountEl.value = String(next);
-  hideTrayWarning();
-  updateTrayEstimateDisplay();
-  positionTraySettingsPopover();
-}
-btnTrayIncEl?.addEventListener("click", () => stepTrayBoxCount(1));
-btnTrayDecEl?.addEventListener("click", () => stepTrayBoxCount(-1));
-inputTrayCountEl?.addEventListener("keydown", (ev) => {
-  if (ev.key === "Enter") {
-    ev.preventDefault();
-    btnTrayApplyEl?.click();
-  }
-});
-btnTrayDefaultEl?.addEventListener("click", () => {
-  commitTrayBoxCount(null);
-});
-btnTrayApplyEl?.addEventListener("click", () => {
-  const raw = Math.round(Number(inputTrayCountEl?.value));
-  if (!Number.isFinite(raw) || raw < 1 || raw > 24) {
-    showToast("Ingresá un número de cajas entre 1 y 24.");
-    return;
-  }
-  const looseCount = buildController.getLoosePieceCount();
-  const approx = Math.ceil(looseCount / raw);
-  if (looseCount > 0 && approx > TRAY_WARNING_AVG_LIMIT) {
-    pendingTrayConfirmCount = raw;
-    if (traySettingsWarningTextEl) {
-      traySettingsWarningTextEl.textContent = `¿Estás seguro? Tomar esta decisión haría que las cajas tengan aproximadamente ${approx} piezas cada una.`;
-    }
-    traySettingsWarningEl?.classList.remove("hidden");
-    positionTraySettingsPopover();
-    return;
-  }
-  commitTrayBoxCount(raw);
-});
-btnTrayWarningCancelEl?.addEventListener("click", () => {
-  hideTrayWarning();
-  positionTraySettingsPopover();
-});
-btnTrayWarningConfirmEl?.addEventListener("click", () => {
-  const target = pendingTrayConfirmCount;
-  if (target != null) {
-    commitTrayBoxCount(target);
-  }
-});
 roomStatusChipEl?.addEventListener("click", () => {
   if (roomManager.isHost()) roomModal.show();
-});
-btnCloseStickerEl?.addEventListener("click", () => setStickerMode(false));
-
-btnStickerPasteEl?.addEventListener("click", async () => {
-  if (!pendingStickerTarget) return;
-  if (!navigator.clipboard?.read) {
-    showToast("Presioná Ctrl + V para pegar tu captura desde el portapapeles.");
-    return;
-  }
-  try {
-    const items = await navigator.clipboard.read();
-    for (const item of items) {
-      const imgType = item.types.find((t) => t.startsWith("image/"));
-      if (imgType) {
-        const blob = await item.getType(imgType);
-        await applyPendingStickerBlob(blob);
-        return;
-      }
-    }
-    showToast("No hay ninguna imagen copiada en el portapapeles.");
-  } catch {
-    showToast("Presioná Ctrl + V para pegar la imagen o subila desde tu dispositivo.");
-  }
-});
-
-inputStickerFileEl?.addEventListener("change", async (ev) => {
-  const file = ev.target.files?.[0];
-  if (!file) return;
-  await applyPendingStickerBlob(file);
-  ev.target.value = "";
-});
-
-window.addEventListener("paste", async (ev) => {
-  if (!pendingStickerTarget) return;
-  const items = Array.from(ev.clipboardData?.items || []);
-  const imageItem = items.find((it) => it.type.startsWith("image/"));
-  if (!imageItem) return;
-  ev.preventDefault();
-  const file = imageItem.getAsFile();
-  if (file) await applyPendingStickerBlob(file);
 });
 
 btnToggleTrayEl?.addEventListener("click", () => {
@@ -996,10 +789,7 @@ inputImportEl.addEventListener("change", async (ev) => {
   const file = ev.target.files?.[0];
   if (!file || !currentSetInfo) return;
   try {
-    const parsed = JSON.parse(await file.text());
-    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.pieces)) {
-      throw new Error("El archivo .json no contiene una lista válida de piezas ('pieces').");
-    }
+    const parsed = validateImportedSave(JSON.parse(await file.text()));
     await loadManifestIntoSlot(currentSetInfo, currentSlotNumber, currentSlotName, parsed);
     await persistCurrentSlot({ showToastOnSuccess: false });
     if (roomManager.isHost()) {
@@ -1016,7 +806,7 @@ inputImportEl.addEventListener("change", async (ev) => {
   }
 });
 
-// Controles de teclado: WASD cámara, R/T Y, F/G X, C/V Z, Flechas altura, H HUD, Espacio revolver
+// Controles de teclado: WASD cámara, R/T Y, F/G X, V/B Z, Flechas altura, H HUD, Espacio revolver
 window.addEventListener("keydown", (ev) => {
   if (ev.target.tagName === "INPUT" || ev.target.tagName === "SELECT" || ev.target.tagName === "TEXTAREA") {
     return;
@@ -1061,8 +851,8 @@ window.addEventListener("keydown", (ev) => {
     (ev.key.toLowerCase() === "z" || ev.code === "KeyZ")
   ) {
     ev.preventDefault();
-    if (stickerMode || pendingStickerTarget) {
-      setStickerMode(false);
+    if (stickerTool.isActive() || stickerTool.hasPendingTarget()) {
+      stickerTool.setMode(false);
       showToast("Modo pegatina cancelado.");
       return;
     }
@@ -1180,10 +970,10 @@ window.addEventListener("keydown", (ev) => {
       buildController.returnSelectedToPile();
       break;
     case "escape":
-      if (isTraySettingsOpen()) {
-        closeTraySettingsPopover();
-      } else if (stickerMode || pendingStickerTarget) {
-        setStickerMode(false);
+      if (traySettingsPopover.isOpen()) {
+        traySettingsPopover.close();
+      } else if (stickerTool.isActive() || stickerTool.hasPendingTarget()) {
+        stickerTool.setMode(false);
       } else if (marqueeState) {
         clearMarquee();
         sceneManager.controls.enabled = true;
@@ -1239,7 +1029,7 @@ async function loadManifestIntoSlot(setInfo, slotNumber, slotName, saveData = nu
 
     await buildController.loadManifest(manifest, saved, savedHistory);
     trayPanel.setManifest(buildController.getEffectiveManifest());
-    refreshTraySettingsUI();
+    traySettingsPopover.refresh();
     manualDrawer.setOpen(false);
     manualDrawer.setSet(currentSetNumber, manifest.source_pdf || "", {
       historyKey: buildManualHistoryKey(currentSetNumber, currentSlotNumber),
@@ -1315,7 +1105,7 @@ async function joinRoomFromLobby({ code, playerName, onProgress }) {
     return;
   }
   trayPanel.setManifest(buildController.getEffectiveManifest());
-  refreshTraySettingsUI();
+  traySettingsPopover.refresh();
   manualDrawer.setOpen(false);
   manualDrawer.setSet(currentSetNumber, manifest.source_pdf || setMeta.pdf_filename || "", {
     historyKey: buildManualHistoryKey(currentSetNumber, null),
@@ -1351,8 +1141,8 @@ async function returnToLobby({ skipFlush = false } = {}) {
     clearMarquee();
     sceneManager.controls.enabled = true;
   }
-  setStickerMode(false);
-  closeTraySettingsPopover();
+  stickerTool.setMode(false);
+  traySettingsPopover.close();
   roomModal.hide();
   buildController.cancelCarry();
   buildController.clearSelection();

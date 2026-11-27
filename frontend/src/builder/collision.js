@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { checkMeshBvhCollision } from "./meshCollision.js";
+import { isIgnoredObject } from "../core/threeHelpers.js";
 
 const _cA = new THREE.Vector3();
 const _cB = new THREE.Vector3();
@@ -187,8 +188,7 @@ export function findCollidingPieces(
 ) {
   const hits = [];
   if (!candidateBoxes?.length || !placedPieces?.length) return hits;
-  const isIgnored = (mesh) =>
-    ignoreMesh instanceof Set ? ignoreMesh.has(mesh) : mesh === ignoreMesh;
+  const isIgnored = (mesh) => isIgnoredObject(ignoreMesh, mesh);
 
   const candidateWorldBox = computeTransformedWorldBox(
     candidateBoxes,

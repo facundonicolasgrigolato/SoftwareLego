@@ -4,6 +4,7 @@ import {
   migrateLocalStorageToSlot1IfNeeded,
   renameSlotOnDisk,
   saveSlotToDisk,
+  validateImportedSave,
 } from "../builder/storage.js";
 import { buildManualHistoryKey, clearSavedManualProgress } from "./manualDrawer.js";
 
@@ -801,10 +802,7 @@ export class LobbyView {
 
   async _importIntoSlot(setInfo, slot, file) {
     try {
-      const parsed = JSON.parse(await file.text());
-      if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.pieces)) {
-        throw new Error("El archivo .json no contiene una lista válida de piezas ('pieces').");
-      }
+      const parsed = validateImportedSave(JSON.parse(await file.text()));
       const pieces = parsed.pieces;
       const history = Array.isArray(parsed.history) ? parsed.history : [];
       const name = slot.exists ? slot.name : parsed.name || `Slot ${slot.slot}`;

@@ -1,0 +1,12 @@
+{
+  "files.watcherExclude": {
+    "**/data/ldraw/**": true,
+    "**/frontend/node_modules/**": true,
+    "**/frontend/dist/**": true
+  },
+  "search.exclude": {
+    "**/data/ldraw/**": true,
+    "**/frontend/node_modules/**": true,
+    "**/frontend/dist/**": true
+  }
+}

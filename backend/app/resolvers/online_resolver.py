@@ -229,8 +229,9 @@ class OnlineHybridResolver(BasePartResolver):
 
     def _local_rel_exists(self, rel_path: str) -> bool:
         clean = _normalize_rel_dat_path(rel_path)
-        target = (self.ldraw_root / clean).resolve()
-        if not str(target).startswith(str(self.ldraw_root.resolve())):
+        base = self.ldraw_root.resolve()
+        target = (base / clean).resolve()
+        if not target.is_relative_to(base):
             return False
         return target.is_file()
 
@@ -238,7 +239,7 @@ class OnlineHybridResolver(BasePartResolver):
         clean = _normalize_rel_dat_path(rel_path)
         base = self.ldraw_root.resolve()
         target = (base / clean).resolve()
-        if not str(target).startswith(str(base)):
+        if not target.is_relative_to(base):
             return None
         target.parent.mkdir(parents=True, exist_ok=True)
         normalized = content.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")

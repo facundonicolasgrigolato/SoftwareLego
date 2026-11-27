@@ -893,3 +893,117 @@ test("Colisión 2 fases (OBB + BVH) permite encajar piezas curvas reales (27925 
     }
   );
 });
+
+test("Bracket 1x2-2x4 (93274 y 21731) extrae supportY=-8 en su pestaña 1x2 y encaja al ras sobre bricks 1x2", async (t) => {
+  const path93274 = path.join(LDRAW_ROOT, "parts", "93274.dat");
+  const path11211 = path.join(LDRAW_ROOT, "parts", "11211.dat");
+  if (!fs.existsSync(path93274) || !fs.existsSync(path11211)) {
+    t.skip("Piezas 93274.dat / 11211.dat no presentes en data/ldraw/ldraw/parts");
+    return;
+  }
+
+  await withMockedLDrawFetch(
+    (pathname) => {
+      if (!pathname.startsWith("/ldraw/")) return null;
+      const full = path.join(LDRAW_ROOT, pathname.slice("/ldraw/".length));
+      if (!full.startsWith(LDRAW_ROOT) || !fs.existsSync(full)) return null;
+      return fs.readFileSync(full);
+    },
+    async () => {
+      const svc = new LDrawService();
+      svc.loader.setPartsLibraryPath("http://localhost/ldraw/");
+      svc._materialsReady = svc.loader.preloadMaterials("http://localhost/ldraw/LDConfig.ldr");
+
+      const load = (id) =>
+        svc.createPartInstance({
+          element_id: id,
+          part_num: id,
+          part_name: id,
+          ldraw_part_id: id,
+          ldraw_color_code: 2,
+        });
+
+      const bracket = await load("93274");
+      assert.equal(bracket.group.userData.defaultSupportUndersideY, -8);
+      assert.equal(bracket.group.userData.recessedReceptors.length, 0);
+      assert.equal(bracket.group.userData.bottomReceptors.length, 2);
+      for (const r of bracket.group.userData.bottomReceptors) {
+        assert.ok(Math.abs(r.y + 8) < 1e-4, "El plano de apoyo debe ser y=-8");
+        assert.ok(Math.abs(r.z) < 1e-4, "Los receptores de 93274 deben centrarse en z=0");
+      }
+
+      if (fs.existsSync(path.join(LDRAW_ROOT, "parts", "21731.dat"))) {
+        const bracket2 = await load("21731");
+        assert.equal(bracket2.group.userData.defaultSupportUndersideY, -8);
+        assert.equal(bracket2.group.userData.recessedReceptors.length, 0);
+      }
+
+      const b1 = await load("11211");
+      const b2 = await load("11211");
+      b1.group.position.set(0, 32, 0);
+      b1.group.rotation.set(0, Math.PI, 0);
+      b1.group.updateMatrixWorld(true);
+      b2.group.position.set(0, 56, 0);
+      b2.group.rotation.set(0, Math.PI, 0);
+      b2.group.updateMatrixWorld(true);
+
+      const q0 = new THREE.Quaternion();
+      const bc = new BuildController(
+        {
+          camera: { position: new THREE.Vector3(-150, 150, 150) },
+          scene: { add() {}, remove() {} },
+          onFrame() {},
+          syncPlacedTransform() {},
+          setSelectionBox() {},
+          refreshSelectionBox() {},
+        },
+        svc
+      );
+      bc.pilePhysics = { isPointInAnyBag: () => false };
+      bc.placedPieces = [
+        {
+          instanceId: "p1",
+          elementId: "11211",
+          mesh: b1.group,
+          localBox: b1.localBox,
+          worldBox: computeTransformedWorldBox(b1.group.userData.collisionBoxes, b1.group.position, b1.group.quaternion),
+        },
+        {
+          instanceId: "p2",
+          elementId: "11211",
+          mesh: b2.group,
+          localBox: b2.localBox,
+          worldBox: computeTransformedWorldBox(b2.group.userData.collisionBoxes, b2.group.position, b2.group.quaternion),
+        },
+      ];
+      bc._lastHit = {
+        kind: "placed",
+        object: b2.group,
+        point: new THREE.Vector3(0, 56, 2),
+        normal: new THREE.Vector3(0, 1, 0),
+      };
+      bc.carry = {
+        source: "tray",
+        elementId: "93274",
+        mesh: bracket.group,
+        ghost: bracket.group.clone(),
+        localBox: bracket.localBox.clone(),
+        quaternion: q0.clone(),
+        surfaceNormal: new THREE.Vector3(0, 1, 0),
+        manualTiltApplied: false,
+        manualOffsetX: 0,
+        manualOffsetY: 0,
+        manualOffsetZ: 0,
+        spinAngle: 0,
+        lastValid: null,
+      };
+      bc._recomputeCarryBounds();
+      bc._updateCarryTransform();
+
+      assert.equal(bc.carry.isColliding, false);
+      assert.ok(Math.abs(bc.carry.ghost.position.x) < 1e-3);
+      assert.ok(Math.abs(bc.carry.ghost.position.y - 64) < 1e-3);
+      assert.ok(Math.abs(bc.carry.ghost.position.z) < 1e-3);
+    }
+  );
+});

@@ -643,7 +643,7 @@ export class LDrawService {
         const area2 = cross.length();
         if (area2 < 1e-4) continue;
 
-        if (cross.y / area2 < -0.85) {
+        if (cross.y / area2 < -0.985) {
           const yBucket = Math.round(a.y / 4) * 4;
           buckets.set(yBucket, (buckets.get(yBucket) || 0) + area2);
         }

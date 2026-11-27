@@ -145,4 +145,26 @@ Este documento registra **qué decidimos, por qué lo decidimos, qué alternativ
   2. Promover a malla individual en `placedGroup` únicamente cuando una pieza recibe pegatinas (`stickerDecal.js`) o queda en mano (`carry`), mantener las piezas translúcidas en grupo separado y actualizar el mapa de sombras bajo demanda (`renderer.shadowMap.autoUpdate = false`).
 - **Ventajas:** Colapsa más de 1.500 piezas en un par de *draw calls*, mantiene aristas LDraw nítidas y conserva fluida la interacción completa con todas las piezas del set visibles.
 
+---
+
+## ADR-014: Servidor HTTP local desacoplado y worker PDF persistente (Etapa 2–3)
+
+- **Estado:** Aceptada
+- **Contexto:** Mantener toda la API local embebida dentro de `vite.config.js` impedía probar las rutas HTTP de forma aislada, y lanzar un subproceso Python por cada página del manual generaba latencia repetida de arranque y reapertura del PDF.
+- **Decisión:**
+  1. Extraer el servidor y validadores a [`frontend/server/localApiServer.mjs`](../frontend/server/localApiServer.mjs) y [`localSecurity.mjs`](../frontend/server/localSecurity.mjs) (montados como middleware en Vite y ejecutables en standalone vía `npm run api`).
+  2. Crear [`backend/scripts/manual_worker.py`](../backend/scripts/manual_worker.py) como worker persistente JSONL sobre `stdin`/`stdout` con caché LRU (`MAX_OPEN_DOCS = 4`).
+  3. Dividir el bundle de producción en chunks vendor (`vendor-three`, `vendor-physics`, `vendor-net`) y automatizar pruebas/build en [`.github/workflows/ci.yml`](../.github/workflows/ci.yml).
+- **Ventajas:** Arranque y render de páginas instantáneo al navegar manuales, pruebas HTTP reales en puerto efímero, mejor cacheo de assets y menor acoplamiento con Vite.
+
+---
+
+## ADR-015: Filtrado estricto de planos horizontales en brackets colgantes (`cross.y < -0.985`)
+
+- **Estado:** Aceptada
+- **Contexto:** Piezas colgantes anchas como `Bracket 1 x 2 - 2 x 4` (`93274.dat` / `21731.dat`) acumulan múltiples *studs* horizontales en su falda vertical; con un umbral laxo (`cross.y < -0.85`), las caras inferiores curvas de esos *studs* laterales sumaban área suficiente en `y = -16` para simular un estante inexistente, desplazando `defaultSupportUndersideY` de `-8` a `-16` y generando `recessedReceptors` descentrados en `Z`.
+- **Decisión:** Exigir inclinación estrictamente horizontal (`cross.y / area2 < -0.985`) en `LDrawService.computeSupportUndersideProfile` para que únicamente los planos reales de apoyo entren en el perfil vertical.
+- **Ventajas:** Corrige el encastre al ras de `93274` / `21731` y conserva intactos los soportes de brackets angostos (`44728`, `99781`) y piezas con rebaje (`5095`, `11477`, `66792`).
+
+
 

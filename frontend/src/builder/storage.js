@@ -43,9 +43,128 @@ function loadLegacyHistoryFromLocalStorage(setNumber) {
   }
 }
 
-function serializeSlotHistory(history) {
+function toPlainVec3(v) {
+  if (!v || typeof v !== "object") return { x: 0, y: 0, z: 0 };
+  const x = Number(v.x);
+  const y = Number(v.y);
+  const z = Number(v.z);
+  return {
+    x: Number.isFinite(x) ? x : 0,
+    y: Number.isFinite(y) ? y : 0,
+    z: Number.isFinite(z) ? z : 0,
+  };
+}
+
+function toPlainEuler(r) {
+  if (!r || typeof r !== "object") return { x: 0, y: 0, z: 0, order: "XYZ" };
+  const x = Number(r.x ?? r._x);
+  const y = Number(r.y ?? r._y);
+  const z = Number(r.z ?? r._z);
+  const order = typeof (r.order ?? r._order) === "string" ? (r.order ?? r._order) : "XYZ";
+  return {
+    x: Number.isFinite(x) ? x : 0,
+    y: Number.isFinite(y) ? y : 0,
+    z: Number.isFinite(z) ? z : 0,
+    order,
+  };
+}
+
+function serializeHistoryAction(act) {
+  if (!act || typeof act !== "object") return act;
+  if (act.type === "add" || act.type === "remove") {
+    return {
+      ...act,
+      position: toPlainVec3(act.position),
+      rotation: toPlainEuler(act.rotation),
+    };
+  }
+  if (act.type === "move") {
+    return {
+      ...act,
+      prevState: {
+        position: toPlainVec3(act.prevState?.position),
+        rotation: toPlainEuler(act.prevState?.rotation),
+      },
+      newState: {
+        position: toPlainVec3(act.newState?.position),
+        rotation: toPlainEuler(act.newState?.rotation),
+      },
+    };
+  }
+  if (act.type === "move-group") {
+    return {
+      type: "move-group",
+      items: (Array.isArray(act.items) ? act.items : []).map((rec) => ({
+        instanceId: rec.instanceId,
+        prevState: {
+          position: toPlainVec3(rec.prevState?.position),
+          rotation: toPlainEuler(rec.prevState?.rotation),
+        },
+        newState: {
+          position: toPlainVec3(rec.newState?.position),
+          rotation: toPlainEuler(rec.newState?.rotation),
+        },
+      })),
+    };
+  }
+  if (act.type === "remove-group") {
+    return {
+      type: "remove-group",
+      items: (Array.isArray(act.items) ? act.items : []).map((e) => ({
+        ...e,
+        position: toPlainVec3(e.position),
+        rotation: toPlainEuler(e.rotation),
+      })),
+    };
+  }
+  return act;
+}
+
+export function serializeSlotHistory(history) {
   if (!Array.isArray(history)) return [];
-  return history.slice(-30);
+  return history.slice(-30).map(serializeHistoryAction);
+}
+
+function isFiniteCoordObj(v) {
+  if (!v || typeof v !== "object") return false;
+  const x = v.x ?? v._x;
+  const y = v.y ?? v._y;
+  const z = v.z ?? v._z;
+  return Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z);
+}
+
+/**
+ * Valida la estructura básica de un archivo `.json` de guardado importado.
+ */
+export function validateImportedSave(parsed) {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !Array.isArray(parsed.pieces)) {
+    throw new Error("El archivo .json no contiene una lista válida de piezas ('pieces').");
+  }
+  for (let i = 0; i < parsed.pieces.length; i += 1) {
+    const p = parsed.pieces[i];
+    if (!p || typeof p !== "object" || typeof p.element_id !== "string" || !p.element_id.trim()) {
+      throw new Error(`Pieza inválida en índice ${i}: falta 'element_id'.`);
+    }
+    if (!isFiniteCoordObj(p.position) || !isFiniteCoordObj(p.rotation)) {
+      throw new Error(`Pieza inválida (${p.element_id}): posición o rotación no numérica.`);
+    }
+    if (p.stickers !== undefined) {
+      if (!Array.isArray(p.stickers)) {
+        throw new Error(`Pieza inválida (${p.element_id}): 'stickers' debe ser una lista.`);
+      }
+      for (const st of p.stickers) {
+        if (
+          !st ||
+          typeof st.faceKey !== "string" ||
+          typeof st.dataUrl !== "string" ||
+          !/^data:image\/(png|jpeg|jpg|webp);base64,/i.test(st.dataUrl)
+        ) {
+          throw new Error(`Pegatina inválida en pieza ${p.element_id}.`);
+        }
+      }
+    }
+  }
+  return parsed;
 }
 
 async function requestJson(url, options = {}) {

@@ -276,6 +276,36 @@ class TestResolvers(unittest.TestCase):
         self.assertFalse(_is_valid_ldraw_content("0 Valid header\nbad line\n"))
         self.assertTrue(_is_valid_ldraw_content("\ufeff0 Part\r\n1 16 0 0 0 1 0 0 0 1 0 0 0 1 s\\a.dat\r\n"))
 
+    def test_save_ldraw_blocks_sibling_prefix_traversal(self) -> None:
+        from app.config import AppPaths
+        from app.resolvers.online_resolver import OnlineHybridResolver
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ldraw_dir = root / "ldraw"
+            sibling_dir = root / "ldraw_evil"
+            (ldraw_dir / "parts").mkdir(parents=True)
+            sibling_dir.mkdir(parents=True)
+            (sibling_dir / "secret.dat").write_text("0 Secret\n", encoding="utf-8")
+
+            paths = AppPaths(
+                root_dir=root,
+                sets_dir=root / "Sets",
+                data_dir=root,
+                rebrickable_dir=root / "rebrickable",
+                ldraw_dir=ldraw_dir,
+                omr_dir=root / "omr",
+                catalog_db_path=root / "catalog.sqlite",
+                overrides_path=root / "overrides.json",
+                api_cache_path=root / "api_cache.json",
+                api_config_path=root / "api_config.json",
+                output_sets_dir=root / "out_sets",
+                output_covers_dir=root / "out_covers",
+            )
+            res = OnlineHybridResolver(paths=paths, allow_network=False)
+            self.assertFalse(res._local_rel_exists("../ldraw_evil/secret.dat"))
+            self.assertIsNone(res._save_ldraw_file("../ldraw_evil/hack.dat", "0 Hack\n"))
+
 
 if __name__ == "__main__":
     unittest.main()

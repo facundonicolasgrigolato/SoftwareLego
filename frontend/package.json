@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "vite --port 5173",
     "build": "vite build",
-    "preview": "vite preview --port 5173"
+    "preview": "vite preview --port 5173",
+    "api": "node server/localApiServer.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "check": "node --check src/main.js && node --check server/localApiServer.mjs && node --check server/localSecurity.mjs"
   },
   "dependencies": {
     "cannon-es": "^0.20.0",

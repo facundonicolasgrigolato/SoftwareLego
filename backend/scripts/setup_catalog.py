@@ -55,7 +55,7 @@ def extract_ldraw_zip(zip_path: Path, ldraw_dir: Path, force: bool = False) -> N
     with zipfile.ZipFile(zip_path, "r") as zf:
         for member in zf.infolist():
             target = (ldraw_dir / member.filename).resolve()
-            if not str(target).startswith(str(base_resolved)):
+            if not target.is_relative_to(base_resolved):
                 raise RuntimeError(f"Ruta insegura dentro del ZIP: {member.filename}")
         zf.extractall(ldraw_dir)
     print("[OK]   Biblioteca LDraw extraída.")

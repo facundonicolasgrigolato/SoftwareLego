@@ -101,9 +101,14 @@ Al iniciar la aplicación se abre la **Sala de Juego 3D**:
   ```
 - **Correr tests y build de producción del frontend:**
   ```powershell
-  node --test frontend/tests/*.test.mjs
   cd frontend
+  npm.cmd test
   npm.cmd run build
+  ```
+- **Levantar solo el servidor HTTP de API local (opcional, p. ej. puerto `5174`):**
+  ```powershell
+  cd frontend
+  npm.cmd run api
   ```
 
 ## Resolución híbrida (Camino B) y piezas sin resolver

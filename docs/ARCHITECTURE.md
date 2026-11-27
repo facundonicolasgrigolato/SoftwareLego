@@ -22,10 +22,10 @@ Construir un simulador local gratuito para armar sets de LEGO en 3D a partir de 
      ▼  (json_exporter + portada PNG)
 [output/sets/<set>.json] + [output/covers/<set>.png]
      │
-     ▼  (Vite local middleware: /api/*, /sets/, /covers/, /ldraw/)
+     ▼  (frontend/server/localApiServer.mjs + manual_worker.py persistente)
 [Sala de Juego (3 slots en Saves/) + Visor PDF (/api/manual/*)]
      │
-     ▼  (Frontend Three.js WebGL2 + cannon-es + LDrawLoader)
+     ▼  (Frontend Three.js WebGL2 + cannon-es + PeerJS P2P)
 [Mesas con cajas físicas + BatchedPieceLayer + Snap LDU + Conectores + BVH + Pegatinas]
 ```
 
@@ -48,15 +48,18 @@ Construir un simulador local gratuito para armar sets de LEGO en 3D a partir de 
 | `backend/app/sequencers/` | Secuenciación híbrida (`hybrid_sequencer.py`, `omr_sequencer.py`, `pdf_bag_analyzer.py`). |
 | `backend/app/exporters/` | Generación de `SetManifest` y estadísticas (`json_exporter.py`). |
 | `backend/app/manual_viewer.py` | Búsqueda de PDFs en `Sets/`, metadatos de página y renderizado PNG vía `pymupdf`. |
-| `backend/scripts/` | CLIs ejecutables: `setup_catalog.py`, `process_set.py` y `render_manual_page.py`. |
-| `backend/tests/` | Suite unitaria (`unittest`) para extractores, resolvedores, secuenciador, exportador y visor PDF. |
-| `frontend/vite.config.js` | Plugin Vite (dev y preview) que sirve `/sets/`, `/covers/`, `/ldraw/` y endpoints `/api/*`. |
-| `frontend/src/main.js` | Orquestador de Sala de Juego, editor 3D, autoguardado por slot, atajos, pegatinas y HUD flotante. |
-| `frontend/src/core/` | Motor 3D: `sceneManager.js`, `ldrawService.js`, `batchedPieceLayer.js`, `tableLayout.js`, `partThumbnailRenderer.js`, `constants.js`. |
-| `frontend/src/builder/` | Reglas de armado: `buildController.js`, `gridSnap.js`, `connectors.js`, `collision.js`, `meshCollision.js`, `stickerDecal.js`, `storage.js`. |
+| `backend/scripts/` | CLIs y workers: `setup_catalog.py`, `process_set.py`, `render_manual_page.py` y worker JSONL `manual_worker.py`. |
+| `backend/tests/` | Suite unitaria (`unittest`) para extractores, resolvedores, catálogo SQLite, secuenciador, exportador, visor PDF y worker persistente. |
+| `frontend/server/` | Servidor HTTP local desacoplado (`localApiServer.mjs`) y validadores de seguridad (`localSecurity.mjs`) para `/sets/`, `/covers/`, `/ldraw/` y `/api/*`. |
+| `frontend/vite.config.js` | Configuración Vite (dev, preview y separación de chunks vendor `three`/`cannon-es`/`peerjs`) que monta `createLocalApiHandler`. |
+| `frontend/src/main.js` | Orquestador de Sala de Juego, editor 3D, autoguardado por slot, atajos y coordinación de HUD. |
+| `frontend/src/core/` | Motor 3D: `sceneManager.js`, `ldrawService.js`, `batchedPieceLayer.js`, `tableLayout.js`, `partThumbnailRenderer.js`, `threeHelpers.js`, `constants.js`. |
+| `frontend/src/builder/` | Reglas de armado modularizadas: `buildController.js`, `placementSolver.js`, `selectionManager.js`, `worldTransitions.js`, `bagDistributor.js`, `historyManager.js`, `gridSnap.js`, `connectors.js`, `connectorExtractor.js`, `collision.js`, `meshCollision.js`, `stickerDecal.js`, `storage.js`. |
+| `frontend/src/net/` | Multijugador cooperativo P2P: `roomManager.js`, `worldSync.js`, `remotePresence.js`. |
 | `frontend/src/physics/` | Simulación de piezas sueltas en cajas con contención estricta (`pilePhysics.js`). |
-| `frontend/src/ui/` | Interfaz DOM: `lobbyView.js`, `manualDrawer.js`, `trayPanel.js`. |
-| `frontend/tests/` | Tests unitarios (`node --test`) para LDraw, colisiones, conectores, batching, layout/contención, pegatinas y almacenamiento. |
+| `frontend/src/ui/` | Interfaz DOM: `lobbyView.js`, `manualDrawer.js`, `trayPanel.js`, `traySettingsPopover.js`, `stickerToolController.js`, `roomModal.js`, `helpGuide.js`, `helpArt.js`. |
+| `frontend/tests/` | Tests unitarios y de integración (`node --test`) para API local, seguridad, LDraw, colisiones, conectores, batching, layout/contención, pegatinas, UI y multijugador. |
+| `.github/workflows/ci.yml` | Pipeline CI automatizado en GitHub Actions (`unittest`, `npm test` y `vite build`). |
 | `docs/` | Documentación técnica (`ARCHITECTURE.md`, `ADR.md`, `DATA_SCHEMA.md`). |
 
 ---
